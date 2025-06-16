@@ -92,6 +92,9 @@ typedef struct {
     int fd;
 } Result;
 
+#define RESULT_DONE    (Result) {.state = STATE_DONE, .kind = RESULT_KIND_VOID}
+#define RESULT_PENDING (Result) {.state = STATE_PENDING, .kind = RESULT_KIND_VOID}
+
 typedef enum {
     TASK_KIND_SEQUENCE,
     TASK_KIND_PARALLEL,
@@ -106,7 +109,7 @@ typedef enum {
 
 typedef struct Task Task;
 
-typedef struct Task {
+struct Task {
     Task_Kind kind;
 
     // TASK_KIND_COUNTER
@@ -139,13 +142,43 @@ typedef struct Task {
 
     // TASK_KIND_READ
     int input_fd;
-} Task;
+};
+
+#define TASK_POOL_CAPACITY 8
+Task task_pool[TASK_POOL_CAPACITY];
+typedef struct Task_Free_Node Task_Free_Node;
+struct Task_Free_Node {
+    Task_Free_Node *next;
+};
+static_assert(sizeof(Task_Free_Node) <= sizeof(Task));
+Task_Free_Node *task_pool_head = NULL;
+
+void task_free_all() {
+    task_pool_head = NULL;
+    for (size_t i=0; i<TASK_POOL_CAPACITY; i++) {
+        Task_Free_Node *cur = (Task_Free_Node *) &task_pool[i];
+        cur->next = task_pool_head;
+        task_pool_head = cur;
+    }
+    assert(task_pool_head != NULL);
+}
+
+Task *task_alloc() {
+    Task_Free_Node *cur = task_pool_head;
+    if (cur == NULL) {
+        UNIMPLEMENTED("alloc_task");
+    }
+    task_pool_head = cur->next;
+    return (Task *) cur;
+}
+
+void task_free(Task *t) {
+    UNUSED(t);
+    UNIMPLEMENTED("free_Task");
+}
 
 #define READ_BUF_CAPACITY 32
 char read_buf[READ_BUF_CAPACITY];
-
-#define RESULT_DONE    (Result) {.state = STATE_DONE, .kind = RESULT_KIND_VOID}
-#define RESULT_PENDING (Result) {.state = STATE_PENDING, .kind = RESULT_KIND_VOID}
 
 Result poll(Task *t) {
     switch (t->kind) {
@@ -255,36 +288,30 @@ Task close_fifo = {
     .kind = TASK_KIND_CLOSE_FIFO,
 };
 
-Task global_read = {
-    .kind = TASK_KIND_READ_FIFO,
-    .input_fd = -1,
-};
-
-Task global_log = {
-    .kind = TASK_KIND_LOG,
-    .message = "",
-};
-
 Task *build_log(Result r) {
     assert(r.state == STATE_DONE);
     assert(r.kind == RESULT_KIND_COMMAND);
-    global_log.message = r.command;
-    return &global_log;
+    Task *log = task_alloc();
+    log->kind = TASK_KIND_LOG;
+    log->message = r.command;
+    return log;
 }
-
-Task glue1;
 
 Task *build_readlog(Result r) {
     assert(r.state == STATE_DONE);
     assert(r.kind == RESULT_KIND_FILE_DESCRIPTOR);
 
-    global_read.input_fd = r.fd;
-    glue1.kind = TASK_KIND_THEN;
-    glue1.fst = &global_read;
-    glue1.snd = NULL;
-    glue1.func = build_log;
+    Task *read = task_alloc();
+    read->kind = TASK_KIND_READ_FIFO;
+    read->input_fd = r.fd;
 
-    return &glue1;
+    Task *glue = task_alloc();
+    glue->kind = TASK_KIND_THEN;
+    glue->fst = read;
+    glue->snd = NULL;
+    glue->func = build_log;
+
+    return glue;
 }
 
 Task glue2;
@@ -304,6 +331,8 @@ Task *build_readlogclose(Result r) {
 }
 
 int main() {
+    task_free_all();
+
     Task read1 = {
         .kind = TASK_KIND_READ_FIFO,
         .input_fd = -1,
