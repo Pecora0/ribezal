@@ -101,8 +101,7 @@ typedef enum {
     TASK_KIND_THEN,
     TASK_KIND_WAIT,
     TASK_KIND_LOG,
-    TASK_KIND_OPEN_FIFO,
-    TASK_KIND_CLOSE_FIFO,
+    TASK_KIND_CONTEXT_FIFO,
     TASK_KIND_READ_FIFO,
     TASK_KIND_COUNTER,
 } Task_Kind;
@@ -140,8 +139,12 @@ struct Task {
     bool started;
     time_t start;
 
-    // TASK_KIND_READ
+    // TASK_KIND_*_FIFO
     int input_fd;
+
+    // TASK_KIND_CONTEXT_FIFO
+    Task *body;
+    Task *(*build_body)(Result);
 };
 
 #define TASK_POOL_CAPACITY 8
@@ -236,16 +239,28 @@ Result poll(Task *t) {
         case TASK_KIND_LOG:
             printf("[LOG] %s\n", t->message);
             return RESULT_DONE;
-        case TASK_KIND_OPEN_FIFO:
-            Result ret = RESULT_DONE;
-            ret.kind = RESULT_KIND_FILE_DESCRIPTOR;
-            ret.fd = make_and_open_fifo();
-            printf("[INFO] opened fifo successfully\n");
+        case TASK_KIND_CONTEXT_FIFO:
+            if (t->input_fd < 0) {
+                t->input_fd = make_and_open_fifo();
+                printf("[INFO] opened fifo successfully\n");
+
+                Result ret = RESULT_DONE;
+                ret.kind = RESULT_KIND_FILE_DESCRIPTOR;
+                ret.fd = t->input_fd;
+                t->body = t->build_body(ret);
+                return RESULT_PENDING;
+            }
+            assert(t->body != NULL);
+            Result ret = poll(t->body);
+            switch (ret.state) {
+                case STATE_DONE:
+                    close_and_unlink_fifo(t->input_fd);
+                    printf("[INFO] closed fifo successfully\n");
+                    break;
+                case STATE_PENDING:
+                    break;
+            }
             return ret;
-        case TASK_KIND_CLOSE_FIFO:
-            close_and_unlink_fifo(t->input_fd);
-            printf("[INFO] closed fifo successfully\n");
-            return RESULT_DONE;
         case TASK_KIND_READ_FIFO:
             ssize_t r = read(t->input_fd, read_buf, READ_BUF_CAPACITY-1);
             if (r == 0) {
@@ -280,14 +295,6 @@ Result poll(Task *t) {
     UNREACHABLE("poll");
 }
 
-Task open_fifo = {
-    .kind = TASK_KIND_OPEN_FIFO,
-};
-
-Task close_fifo = {
-    .kind = TASK_KIND_CLOSE_FIFO,
-};
-
 Task *build_log(Result r) {
     assert(r.state == STATE_DONE);
     assert(r.kind == RESULT_KIND_COMMAND);
@@ -312,22 +319,6 @@ Task *build_readlog(Result r) {
     glue->func = build_log;
 
     return glue;
-}
-
-Task glue2;
-Task *glue2_data[2];
-
-Task *build_readlogclose(Result r) {
-    assert(r.state == STATE_DONE);
-    assert(r.kind == RESULT_KIND_FILE_DESCRIPTOR);
-
-    close_fifo.input_fd = r.fd;
-    glue2.kind = TASK_KIND_SEQUENCE;
-    glue2.seq_count = 2;
-    glue2_data[0] = build_readlog(r);
-    glue2_data[1] = &close_fifo;
-    glue2.seq = glue2_data;
-    return &glue2;
 }
 
 int main() {
@@ -367,25 +358,17 @@ int main() {
     };
     UNUSED(foo);
 
-    Task *seq_data[] = {&open_fifo, &readlog1, &readlog2, &close_fifo};
-    Task seq = {
-        .kind = TASK_KIND_SEQUENCE,
-        .seq_count = sizeof(seq_data) / sizeof(seq_data[0]),
-        .seq = seq_data,
-    };
-    UNUSED(seq);
-
-    Task test = {
-        .kind = TASK_KIND_THEN,
-        .fst = &open_fifo,
-        .snd = NULL,
-        .func = build_readlogclose,
+    Task fifo = {
+        .kind = TASK_KIND_CONTEXT_FIFO,
+        .input_fd = -1,
+        .body = NULL,
+        .build_body = build_readlog,
     };
 
     printf("[INFO] starting server\n");
-    Result r = poll(&test);
+    Result r = poll(&fifo);
     while (r.state != STATE_DONE) {
-        r = poll(&test);
+        r = poll(&fifo);
     }
     printf("[INFO] finishing server\n");
 }
