@@ -1,0 +1,13 @@
+#ifndef DEVUTILS_H
+#define DEVUTILS_H
+
+#include <stdlib.h>
+
+// Copied from https://github.com/tsoding/nob.h/blob/main/nob.h
+#define UNUSED(value) (void)(value)
+#define TODO(message) do { fprintf(stderr, "%s:%d: TODO: %s\n", __FILE__, __LINE__, message); abort(); } while(0)
+#define UNREACHABLE(message) do { fprintf(stderr, "%s:%d: UNREACHABLE: %s\n", __FILE__, __LINE__, message); abort(); } while(0)
+
+#define UNIMPLEMENTED(message) do { fprintf(stderr, "%s:%d: UNIMPLEMENTED: %s\n", __FILE__, __LINE__, message); abort(); } while(0)
+
+#endif // DEVUTILS_H
