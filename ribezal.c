@@ -101,12 +101,14 @@ typedef enum {
     TASK_KIND_THEN,
     TASK_KIND_WAIT,
     TASK_KIND_LOG,
-    TASK_KIND_CONTEXT_FIFO,
-    TASK_KIND_READ_FIFO,
+    TASK_KIND_FIFO_CONTEXT,
+    TASK_KIND_FIFO_READ,
+    TASK_KIND_FIFO_REPL,
     TASK_KIND_COUNTER,
 } Task_Kind;
 
 typedef struct Task Task;
+typedef Task *(*Then_Function)(Result);
 
 struct Task {
     Task_Kind kind;
@@ -129,7 +131,7 @@ struct Task {
     // TASK_KIND_THEN
     Task *fst;
     Task *snd;
-    Task *(*func)(Result);
+    Then_Function then;
 
     // TASK_KIND_LOG
     char *message;
@@ -144,7 +146,7 @@ struct Task {
 
     // TASK_KIND_CONTEXT_FIFO
     Task *body;
-    Task *(*build_body)(Result);
+    Then_Function build_body;
 };
 
 #define TASK_POOL_CAPACITY 8
@@ -178,6 +180,24 @@ Task *task_alloc() {
 void task_free(Task *t) {
     UNUSED(t);
     UNIMPLEMENTED("free_Task");
+}
+
+typedef enum {
+    REPLY_CLOSE,
+    REPLY_ACK,
+} Reply_Kind;
+
+#define SPACES " \f\n\r\t\v"
+
+Reply_Kind execute(char *prog) {
+    for (char *token = strtok(prog, SPACES); token != NULL; token = strtok(NULL, SPACES)) {
+        if (strcmp(token, "quit") == 0) {
+            return REPLY_CLOSE;
+        } else {
+            printf("Echo: %s\n", token);
+        }
+    }
+    return REPLY_ACK;
 }
 
 #define READ_BUF_CAPACITY 32
@@ -219,7 +239,7 @@ Result poll(Task *t) {
                 Result r = poll(t->fst);
                 switch (r.state) {
                     case STATE_DONE:
-                        t->snd = t->func(r);
+                        t->snd = t->then(r);
                         break;
                     case STATE_PENDING:
                         break;
@@ -239,7 +259,7 @@ Result poll(Task *t) {
         case TASK_KIND_LOG:
             printf("[LOG] %s\n", t->message);
             return RESULT_DONE;
-        case TASK_KIND_CONTEXT_FIFO:
+        case TASK_KIND_FIFO_CONTEXT:
             if (t->input_fd < 0) {
                 t->input_fd = make_and_open_fifo();
                 printf("[INFO] opened fifo successfully\n");
@@ -261,22 +281,46 @@ Result poll(Task *t) {
                     break;
             }
             return ret;
-        case TASK_KIND_READ_FIFO:
-            ssize_t r = read(t->input_fd, read_buf, READ_BUF_CAPACITY-1);
-            if (r == 0) {
-                return RESULT_PENDING;
-            } else if (r == -1 && errno == EAGAIN) {
-                return RESULT_PENDING;
-            } else if (r > 0) {
-                assert(r < READ_BUF_CAPACITY-1);
-                read_buf[r] = '\0';
-                Result ret = RESULT_DONE;
-                ret.kind = RESULT_KIND_COMMAND;
-                ret.command = read_buf;
-                return ret;
-            } else {
-                printf("[ERROR] Could not read from file: %s\n", strerror(errno));
-                exit(1);
+        case TASK_KIND_FIFO_READ:
+            {
+                ssize_t r = read(t->input_fd, read_buf, READ_BUF_CAPACITY-1);
+                if (r == 0) {
+                    return RESULT_PENDING;
+                } else if (r == -1 && errno == EAGAIN) {
+                    return RESULT_PENDING;
+                } else if (r > 0) {
+                    assert(r < READ_BUF_CAPACITY-1);
+                    read_buf[r] = '\0';
+                    Result ret = RESULT_DONE;
+                    ret.kind = RESULT_KIND_COMMAND;
+                    ret.command = read_buf;
+                    return ret;
+                } else {
+                    printf("[ERROR] Could not read from file: %s\n", strerror(errno));
+                    exit(1);
+                }
+            }
+        case TASK_KIND_FIFO_REPL:
+            {
+                ssize_t r = read(t->input_fd, read_buf, READ_BUF_CAPACITY-1);
+                if (r == 0) {
+                    return RESULT_PENDING;
+                } else if (r == -1 && errno == EAGAIN) {
+                    return RESULT_PENDING;
+                } else if (r > 0) {
+                    assert(r < READ_BUF_CAPACITY);
+                    read_buf[r] = '\0';
+                    switch (execute(read_buf)) {
+                        case REPLY_CLOSE:
+                            return RESULT_DONE;
+                        case REPLY_ACK:
+                            return RESULT_PENDING;
+                    }
+                    UNREACHABLE("invalid Result_Kind");
+                } else {
+                    printf("[ERROR] Could not read from file: %s\n", strerror(errno));
+                    exit(1);
+                }
             }
         case TASK_KIND_COUNTER:
             set_color(t->color);
@@ -304,65 +348,43 @@ Task *build_log(Result r) {
     return log;
 }
 
-Task *build_readlog(Result r) {
+Task *readlog(Result r) {
     assert(r.state == STATE_DONE);
     assert(r.kind == RESULT_KIND_FILE_DESCRIPTOR);
 
     Task *read = task_alloc();
-    read->kind = TASK_KIND_READ_FIFO;
+    read->kind = TASK_KIND_FIFO_READ;
     read->input_fd = r.fd;
 
     Task *glue = task_alloc();
     glue->kind = TASK_KIND_THEN;
     glue->fst = read;
     glue->snd = NULL;
-    glue->func = build_log;
+    glue->then = build_log;
 
     return glue;
 }
 
+Task *repl(Result r) {
+    assert(r.state == STATE_DONE);
+    assert(r.kind == RESULT_KIND_FILE_DESCRIPTOR);
+
+    Task *repl = task_alloc();
+    repl->kind = TASK_KIND_FIFO_REPL;
+    repl->input_fd = r.fd;
+
+    return repl;
+}
+
 int main() {
+    // We need to do this to initialize the pool allocator
     task_free_all();
 
-    Task read1 = {
-        .kind = TASK_KIND_READ_FIFO,
-        .input_fd = -1,
-    };
-
-    Task readlog1 = {
-        .kind = TASK_KIND_THEN,
-        .fst = &read1,
-        .snd = NULL,
-        .func = build_log,
-    };
-
-    Task read2 = {
-        .kind = TASK_KIND_READ_FIFO,
-        .input_fd = -1,
-    };
-    UNUSED(readlog1);
-
-    Task readlog2 = {
-        .kind = TASK_KIND_THEN,
-        .fst = &read2,
-        .snd = NULL,
-        .func = build_log,
-    };
-    UNUSED(readlog2);
-
-    Task foo = {
-        .kind = TASK_KIND_COUNTER,
-        .cur = 0,
-        .end = 10,
-        .color = RED,
-    };
-    UNUSED(foo);
-
     Task fifo = {
-        .kind = TASK_KIND_CONTEXT_FIFO,
+        .kind = TASK_KIND_FIFO_CONTEXT,
         .input_fd = -1,
         .body = NULL,
-        .build_body = build_readlog,
+        .build_body = repl,
     };
 
     printf("[INFO] starting server\n");
@@ -371,4 +393,8 @@ int main() {
         r = poll(&fifo);
     }
     printf("[INFO] finishing server\n");
+    
+    size_t count = 0;
+    for (Task_Free_Node *i = task_pool_head; i != NULL; i = i->next) count++;
+    printf("[INFO] memory leaked %zu tasks from the pool\n", TASK_POOL_CAPACITY - count);
 }
