@@ -100,6 +100,24 @@ bool stack_two_int() {
     return (stack[i1].kind == STACK_VALUE_INT) && (stack[i2].kind == STACK_VALUE_INT);
 }
 
+void stack_print() {
+    printf("[");
+    for (size_t i=0; i+1<stack_count; i++) {
+        switch (stack[i].kind) {
+            case STACK_VALUE_STRING: printf("%s, ", stack[i].str); break;
+            case STACK_VALUE_INT:    printf("%d, ", stack[i].x); break;
+        }
+    }
+    if (stack_count > 0) {
+        size_t i = stack_count-1;
+        switch (stack[i].kind) {
+            case STACK_VALUE_STRING: printf("%s", stack[i].str); break;
+            case STACK_VALUE_INT:    printf("%d", stack[i].x); break;
+        }
+    }
+    printf("]\n");
+}
+
 #define FIFO_NAME "input-fifo"
 
 int make_and_open_fifo() {
@@ -255,21 +273,7 @@ Reply_Kind execute(char *prog) {
         } else if (strcmp(token, "quit") == 0) {
             return REPLY_CLOSE;
         } else if (strcmp(token, "print") == 0) {
-            printf("[");
-            for (size_t i=0; i+1<stack_count; i++) {
-                switch (stack[i].kind) {
-                    case STACK_VALUE_STRING: printf("%s, ", stack[i].str); break;
-                    case STACK_VALUE_INT:    printf("%d, ", stack[i].x); break;
-                }
-            }
-            if (stack_count > 0) {
-                size_t i = stack_count-1;
-                switch (stack[i].kind) {
-                    case STACK_VALUE_STRING: printf("%s", stack[i].str); break;
-                    case STACK_VALUE_INT:    printf("%d", stack[i].x); break;
-                }
-            }
-            printf("]\n");
+            stack_print();
         } else if (strcmp(token, "drop") == 0) {
             stack_drop();
         } else if (strcmp(token, "clear") == 0) {
@@ -514,12 +518,6 @@ int main() {
     for (Task_Free_Node *i = task_pool_head; i != NULL; i = i->next) count++;
     printf("[INFO] memory leaked %zu tasks from the pool\n", TASK_POOL_CAPACITY - count);
 
-    printf("[INFO] stack base -----------\n");
-    for (size_t i=0; i<stack_count; i++) {
-        switch (stack[i].kind) {
-            case STACK_VALUE_STRING: printf("[INFO] %s\n", stack[i].str); break;
-            case STACK_VALUE_INT:    printf("[INFO] %d\n", stack[i].x); break;
-        }
-    }
-    printf("[INFO] stack top ------------\n");
+    printf("[INFO] Stack: ");
+    stack_print();
 }
