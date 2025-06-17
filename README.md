@@ -37,3 +37,11 @@ There are the following keywords:
 - `drop`
 - `clear`
 - `+`, `-`, `*`, `/`
+
+## Shoutouts
+
+Some cool ressources I am using as inspiration:
+
+- [c3fut](https://github.com/tsoding/c3fut): a futures implementation for the language C3 using interfaces
+- [Pool Allocator](https://www.gingerbill.org/article/2019/02/16/memory-allocation-strategies-004/):
+    excellent explanation of the principle of a pool allocator
