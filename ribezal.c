@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <string.h>
 #include <assert.h>
+#include <ctype.h>
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -42,6 +43,61 @@ void set_color(Color c) {
 
 void reset_color() {
     printf("\x1b[0m");
+}
+
+typedef enum {
+    STACK_VALUE_STRING,
+    STACK_VALUE_INT,
+} Stack_Value_Kind;
+
+typedef struct {
+    Stack_Value_Kind kind;
+    union {
+        int x;
+        char *str;
+    };
+} Stack_Value;
+
+#define MAX_STACK_SIZE 8
+Stack_Value stack[MAX_STACK_SIZE];
+size_t stack_count = 0;
+
+void stack_push_string(char *str) {
+    size_t l = strlen(str);
+    char *dest = malloc((l+1)*sizeof(char));
+    strcpy(dest, str);
+    assert(dest[l] == '\0');
+
+    assert(stack_count < MAX_STACK_SIZE);
+    stack[stack_count].kind = STACK_VALUE_STRING;
+    stack[stack_count].str  = dest;
+    stack_count++;
+}
+
+void stack_push_int(int x) {
+    assert(stack_count < MAX_STACK_SIZE);
+    stack[stack_count].kind = STACK_VALUE_INT;
+    stack[stack_count].x = x;
+    stack_count++;
+}
+
+void stack_drop() {
+    if (stack_count == 0) return;
+    switch (stack[stack_count-1].kind) {
+        case STACK_VALUE_STRING:
+            free(stack[stack_count-1].str);
+            break;
+        case STACK_VALUE_INT:
+            break;
+    }
+    stack_count--;
+}
+
+bool stack_two_int() {
+    if (stack_count < 2) return false;
+    size_t i1 = stack_count-1;
+    size_t i2 = stack_count-2;
+    return (stack[i1].kind == STACK_VALUE_INT) && (stack[i2].kind == STACK_VALUE_INT);
 }
 
 #define FIFO_NAME "input-fifo"
@@ -185,16 +241,73 @@ void task_free(Task *t) {
 typedef enum {
     REPLY_CLOSE,
     REPLY_ACK,
+    REPLY_REJECT,
 } Reply_Kind;
 
 #define SPACES " \f\n\r\t\v"
 
 Reply_Kind execute(char *prog) {
     for (char *token = strtok(prog, SPACES); token != NULL; token = strtok(NULL, SPACES)) {
-        if (strcmp(token, "quit") == 0) {
+        char *endptr;
+        int val = strtol(token, &endptr, 10);
+        if (*endptr == '\0') {
+            stack_push_int(val);
+        } else if (strcmp(token, "quit") == 0) {
             return REPLY_CLOSE;
+        } else if (strcmp(token, "print") == 0) {
+            printf("[");
+            for (size_t i=0; i+1<stack_count; i++) {
+                switch (stack[i].kind) {
+                    case STACK_VALUE_STRING: printf("%s, ", stack[i].str); break;
+                    case STACK_VALUE_INT:    printf("%d, ", stack[i].x); break;
+                }
+            }
+            if (stack_count > 0) {
+                size_t i = stack_count-1;
+                switch (stack[i].kind) {
+                    case STACK_VALUE_STRING: printf("%s", stack[i].str); break;
+                    case STACK_VALUE_INT:    printf("%d", stack[i].x); break;
+                }
+            }
+            printf("]\n");
+        } else if (strcmp(token, "drop") == 0) {
+            stack_drop();
+        } else if (strcmp(token, "clear") == 0) {
+            while (stack_count > 0) stack_drop();
+        } else if (strcmp(token, "+") == 0) {
+            if (stack_two_int()) {
+                int x = stack[stack_count-1].x;
+                stack_drop();
+                stack[stack_count-1].x += x;
+            }
+        } else if (strcmp(token, "-") == 0) {
+            if (stack_two_int()) {
+                int x = stack[stack_count-1].x;
+                stack_drop();
+                stack[stack_count-1].x -= x;
+            }
+        } else if (strcmp(token, "*") == 0) {
+            if (stack_two_int()) {
+                int x = stack[stack_count-1].x;
+                stack_drop();
+                stack[stack_count-1].x *= x;
+            }
+        } else if (strcmp(token, "/") == 0) {
+            if (stack_two_int()) {
+                int x = stack[stack_count-1].x;
+                stack_drop();
+                stack[stack_count-1].x /= x;
+            }
         } else {
-            printf("Echo: %s\n", token);
+            bool all_graph = true;
+            for (char *c = token; *c != '\0'; c++) {
+                all_graph = all_graph && isgraph(*c);
+            }
+            if (all_graph) {
+                stack_push_string(token);
+            } else {
+                return REPLY_REJECT;
+            }
         }
     }
     return REPLY_ACK;
@@ -313,6 +426,9 @@ Result poll(Task *t) {
                     switch (execute(read_buf)) {
                         case REPLY_CLOSE:
                             return RESULT_DONE;
+                        case REPLY_REJECT:
+                            printf("Unknown command\n");
+                            return RESULT_PENDING;
                         case REPLY_ACK:
                             return RESULT_PENDING;
                     }
@@ -397,4 +513,13 @@ int main() {
     size_t count = 0;
     for (Task_Free_Node *i = task_pool_head; i != NULL; i = i->next) count++;
     printf("[INFO] memory leaked %zu tasks from the pool\n", TASK_POOL_CAPACITY - count);
+
+    printf("[INFO] stack base -----------\n");
+    for (size_t i=0; i<stack_count; i++) {
+        switch (stack[i].kind) {
+            case STACK_VALUE_STRING: printf("[INFO] %s\n", stack[i].str); break;
+            case STACK_VALUE_INT:    printf("[INFO] %d\n", stack[i].x); break;
+        }
+    }
+    printf("[INFO] stack top ------------\n");
 }
