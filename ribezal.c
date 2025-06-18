@@ -187,40 +187,52 @@ typedef Task *(*Then_Function)(Result);
 struct Task {
     Task_Kind kind;
 
-    // TASK_KIND_COUNTER
-    int cur;
-    int end;
-    char *name;
-    Color color;
-
-    // TASK_KIND_SEQUENCE
-    size_t seq_count;
-    struct Task **seq;
-
-    // TASK_KIND_PARALLEL
-    size_t par_count;
-    size_t par_index;
-    Task **par;
-
-    // TASK_KIND_THEN
-    Task *fst;
-    Task *snd;
-    Then_Function then;
-
-    // TASK_KIND_LOG
-    char *message;
-    
-    // TASK_KIND_WAIT
-    double duration;
-    bool started;
-    time_t start;
-
-    // TASK_KIND_*_FIFO
-    int input_fd;
-
-    // TASK_KIND_CONTEXT_FIFO
-    Task *body;
-    Then_Function build_body;
+    union {
+        // TASK_KIND_COUNTER
+        struct {
+            int counter_cur;
+            int counter_end;
+            char *counter_name;
+            Color color;
+        };
+        // TASK_KIND_SEQUENCE
+        struct {
+            size_t seq_count;
+            struct Task **seq;
+        };
+        // TASK_KIND_PARALLEL
+        struct {
+            size_t par_count;
+            size_t par_index;
+            Task **par;
+        };
+        // TASK_KIND_THEN
+        struct {
+            Task *fst;
+            Task *snd;
+            Then_Function then;
+        };
+        // TASK_KIND_LOG
+        struct {
+            char *log_msg;
+        };
+        // TASK_KIND_WAIT
+        struct {
+            double duration;
+            bool started;
+            time_t start;
+        };
+        // TASK_KIND_FIFO_READ, TASK_KIND_FIFO_REPL
+        struct {
+            int file_desc;
+        };
+        // TASK_KIND_FIFO_CONTEXT
+        struct {
+            Task *body;
+            Then_Function build_body;
+            int fifo_fd;
+        };
+    };
 };
 
 #define TASK_POOL_CAPACITY 8
@@ -374,16 +386,16 @@ Result poll(Task *t) {
             if (difftime(now, t->start) >= t->duration) return RESULT_DONE;
             return RESULT_PENDING;
         case TASK_KIND_LOG:
-            printf("[LOG] %s\n", t->message);
+            printf("[LOG] %s\n", t->log_msg);
             return RESULT_DONE;
         case TASK_KIND_FIFO_CONTEXT:
-            if (t->input_fd < 0) {
-                t->input_fd = make_and_open_fifo();
+            if (t->fifo_fd < 0) {
+                t->fifo_fd = make_and_open_fifo();
                 printf("[INFO] opened fifo successfully\n");
 
                 Result ret = RESULT_DONE;
                 ret.kind = RESULT_KIND_FILE_DESCRIPTOR;
-                ret.fd = t->input_fd;
+                ret.fd = t->fifo_fd;
                 t->body = t->build_body(ret);
                 return RESULT_PENDING;
             }
@@ -391,7 +403,7 @@ Result poll(Task *t) {
             Result ret = poll(t->body);
             switch (ret.state) {
                 case STATE_DONE:
-                    close_and_unlink_fifo(t->input_fd);
+                    close_and_unlink_fifo(t->fifo_fd);
                     printf("[INFO] closed fifo successfully\n");
                     break;
                 case STATE_PENDING:
@@ -400,7 +412,7 @@ Result poll(Task *t) {
             return ret;
         case TASK_KIND_FIFO_READ:
             {
-                ssize_t r = read(t->input_fd, read_buf, READ_BUF_CAPACITY-1);
+                ssize_t r = read(t->file_desc, read_buf, READ_BUF_CAPACITY-1);
                 if (r == 0) {
                     return RESULT_PENDING;
                 } else if (r == -1 && errno == EAGAIN) {
@@ -419,7 +431,7 @@ Result poll(Task *t) {
             }
         case TASK_KIND_FIFO_REPL:
             {
-                ssize_t r = read(t->input_fd, read_buf, READ_BUF_CAPACITY-1);
+                ssize_t r = read(t->file_desc, read_buf, READ_BUF_CAPACITY-1);
                 if (r == 0) {
                     return RESULT_PENDING;
                 } else if (r == -1 && errno == EAGAIN) {
@@ -444,14 +456,14 @@ Result poll(Task *t) {
             }
         case TASK_KIND_COUNTER:
             set_color(t->color);
-            if (t->cur < t->end) {
-                printf("Counter %s: %d\n", t->name, t->cur);
-                t->cur++;
+            if (t->counter_cur < t->counter_end) {
+                printf("Counter %s: %d\n", t->counter_name, t->counter_cur);
+                t->counter_cur++;
                 printf("\x1b[0m");
                 fflush(stdout);
                 return RESULT_PENDING;
             }
-            printf("Counter %s: Finished\n", t->name);
+            printf("Counter %s: Finished\n", t->counter_name);
             reset_color();
             fflush(stdout);
             return RESULT_DONE;
@@ -464,7 +476,7 @@ Task *build_log(Result r) {
     assert(r.kind == RESULT_KIND_COMMAND);
     Task *log = task_alloc();
     log->kind = TASK_KIND_LOG;
-    log->message = r.command;
+    log->log_msg = r.command;
     return log;
 }
 
@@ -474,7 +486,7 @@ Task *readlog(Result r) {
 
     Task *read = task_alloc();
     read->kind = TASK_KIND_FIFO_READ;
-    read->input_fd = r.fd;
+    read->file_desc = r.fd;
 
     Task *glue = task_alloc();
     glue->kind = TASK_KIND_THEN;
@@ -491,7 +503,7 @@ Task *repl(Result r) {
 
     Task *repl = task_alloc();
     repl->kind = TASK_KIND_FIFO_REPL;
-    repl->input_fd = r.fd;
+    repl->file_desc = r.fd;
 
     return repl;
 }
@@ -502,7 +514,7 @@ int main() {
 
     Task fifo = {
         .kind = TASK_KIND_FIFO_CONTEXT,
-        .input_fd = -1,
+        .fifo_fd = -1,
         .body = NULL,
         .build_body = repl,
     };
