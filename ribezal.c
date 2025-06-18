@@ -155,6 +155,7 @@ typedef enum {
 
 typedef enum {
     RESULT_KIND_VOID,
+    RESULT_KIND_INT,
     RESULT_KIND_COMMAND,
     RESULT_KIND_FILE_DESCRIPTOR,
 } Result_Kind;
@@ -162,6 +163,7 @@ typedef enum {
 typedef struct {
     State state;
     Result_Kind kind;
+    int x;
     char *command;
     int fd;
 } Result;
@@ -170,24 +172,31 @@ typedef struct {
 #define RESULT_PENDING (Result) {.state = STATE_PENDING, .kind = RESULT_KIND_VOID}
 
 typedef enum {
+    TASK_KIND_CONST,
     TASK_KIND_SEQUENCE,
     TASK_KIND_PARALLEL,
     TASK_KIND_THEN,
+    TASK_KIND_ITERATE,
     TASK_KIND_WAIT,
     TASK_KIND_LOG,
     TASK_KIND_FIFO_CONTEXT,
     TASK_KIND_FIFO_READ,
     TASK_KIND_FIFO_REPL,
-    TASK_KIND_COUNTER,
 } Task_Kind;
 
 typedef struct Task Task;
 typedef Task *(*Then_Function)(Result);
+typedef bool (*Predicate)(Result);
+
+#define MAX_SEQ_COUNT 4
 
 struct Task {
     Task_Kind kind;
-
     union {
+        // TASK_KIND_CONST
+        struct {
+            Result const_result;
+        };
         // TASK_KIND_COUNTER
         struct {
             int counter_cur;
@@ -198,7 +207,8 @@ struct Task {
         // TASK_KIND_SEQUENCE
         struct {
             size_t seq_count;
-            struct Task **seq;
+            size_t seq_index;
+            Task *seq[MAX_SEQ_COUNT];
         };
         // TASK_KIND_PARALLEL
         struct {
@@ -211,6 +221,12 @@ struct Task {
             Task *fst;
             Task *snd;
             Then_Function then;
+        };
+        // TASK_KIND_ITERATE
+        struct {
+            Task *iter_body;
+            Then_Function iter_next;
+            Predicate iter_condition;
         };
         // TASK_KIND_LOG
         struct {
@@ -254,6 +270,10 @@ void task_free_all() {
     assert(task_pool_head != NULL);
 }
 
+bool task_in_pool(Task *t) {
+    return task_pool <= t && t < task_pool + TASK_POOL_CAPACITY;
+}
+
 Task *task_alloc() {
     Task_Free_Node *cur = task_pool_head;
     if (cur == NULL) {
@@ -264,8 +284,14 @@ Task *task_alloc() {
 }
 
 void task_free(Task *t) {
-    UNUSED(t);
-    UNIMPLEMENTED("free_Task");
+    if (t == NULL) return;
+
+    //make sure t is actually in the task pool and does not come from somewhere else
+    assert(task_in_pool(t));
+
+    Task_Free_Node *tfree = (Task_Free_Node *) t;
+    tfree->next = task_pool_head;
+    task_pool_head = tfree;
 }
 
 typedef enum {
@@ -329,19 +355,53 @@ Reply_Kind execute(char *prog) {
     return REPLY_ACK;
 }
 
+// TODO: multiple read tasks can use this so every read task should have its own
 #define READ_BUF_CAPACITY 32
 char read_buf[READ_BUF_CAPACITY];
 
+// TODO: multiple log tasks can use this so every log task should have its own
+#define LOG_BUF_CAPACITY 32
+char log_buf[LOG_BUF_CAPACITY];
+
+void destroy(Task *t) {
+    switch (t->kind) {
+        case TASK_KIND_CONST:
+            break;
+        case TASK_KIND_SEQUENCE:
+            break;
+        case TASK_KIND_PARALLEL:
+        case TASK_KIND_THEN:
+        case TASK_KIND_ITERATE:
+            UNIMPLEMENTED("destroy");
+        case TASK_KIND_WAIT:
+            break;
+        case TASK_KIND_LOG:
+            log_buf[0] = '\0';
+            break;
+        case TASK_KIND_FIFO_CONTEXT:
+        case TASK_KIND_FIFO_READ:
+        case TASK_KIND_FIFO_REPL:
+            UNIMPLEMENTED("destroy");
+    }
+    if (task_in_pool(t)) task_free(t);
+}
+
 Result poll(Task *t) {
     switch (t->kind) {
+        case TASK_KIND_CONST:
+            return t->const_result;
         case TASK_KIND_SEQUENCE: 
             {
-                if (t->seq_count == 0) return RESULT_DONE;
-                Result r = poll(t->seq[0]);
+                assert(t->seq_index < t->seq_count);
+                Result r = poll(t->seq[t->seq_index]);
                 switch (r.state) {
                     case STATE_DONE:
-                        t->seq_count--;
-                        t->seq++;
+                        destroy(t->seq[t->seq_index]);
+                        t->seq_index++;
+
+                        // if this was the last Task in the sequence we should return its result
+                        if (t->seq_index == t->seq_count) return r;
+                        break;
                     case STATE_PENDING:
                 }
                 return RESULT_PENDING;
@@ -376,6 +436,22 @@ Result poll(Task *t) {
                 return RESULT_PENDING;
             }
             return poll(t->snd);
+        case TASK_KIND_ITERATE:
+            assert(t->iter_body != NULL);
+            Result r = poll(t->iter_body);
+            switch (r.state) {
+                case STATE_DONE:
+                    destroy(t->iter_body);
+                    if (t->iter_condition(r)) {
+                        t->iter_body = t->iter_next(r);
+                        return RESULT_PENDING;
+                    } else {
+                        return r;
+                    }
+                case STATE_PENDING:
+                    return r;
+            }
+            UNREACHABLE("invalid Result_Kind");
         case TASK_KIND_WAIT:
             if (!t->started) {
                 t->start = time(NULL);
@@ -454,47 +530,31 @@ Result poll(Task *t) {
                     exit(1);
                 }
             }
-        case TASK_KIND_COUNTER:
-            set_color(t->color);
-            if (t->counter_cur < t->counter_end) {
-                printf("Counter %s: %d\n", t->counter_name, t->counter_cur);
-                t->counter_cur++;
-                printf("\x1b[0m");
-                fflush(stdout);
-                return RESULT_PENDING;
-            }
-            printf("Counter %s: Finished\n", t->counter_name);
-            reset_color();
-            fflush(stdout);
-            return RESULT_DONE;
     }
     UNREACHABLE("poll");
 }
 
-Task *build_log(Result r) {
-    assert(r.state == STATE_DONE);
-    assert(r.kind == RESULT_KIND_COMMAND);
-    Task *log = task_alloc();
-    log->kind = TASK_KIND_LOG;
-    log->log_msg = r.command;
-    return log;
+Task *task_const(Result r) {
+    Task *ret = task_alloc();
+    ret->kind = TASK_KIND_CONST;
+    ret->const_result = r;
+    return ret;
 }
 
-Task *readlog(Result r) {
-    assert(r.state == STATE_DONE);
-    assert(r.kind == RESULT_KIND_FILE_DESCRIPTOR);
+Task *task_log(char *msg) {
+    Task *ret = task_alloc();
+    ret->kind = TASK_KIND_LOG;
+    ret->log_msg = msg;
+    return ret;
+}
 
-    Task *read = task_alloc();
-    read->kind = TASK_KIND_FIFO_READ;
-    read->file_desc = r.fd;
-
-    Task *glue = task_alloc();
-    glue->kind = TASK_KIND_THEN;
-    glue->fst = read;
-    glue->snd = NULL;
-    glue->then = build_log;
-
-    return glue;
+Task *task_wait(double dur) {
+    Task *ret = task_alloc();
+    ret->kind = TASK_KIND_WAIT;
+    ret->started = false;
+    ret->duration = dur;
+    ret->start = 0;
+    return ret;
 }
 
 Task *repl(Result r) {
@@ -508,6 +568,34 @@ Task *repl(Result r) {
     return repl;
 }
 
+Task *next(Result r) {
+    assert(r.state == STATE_DONE);
+    assert(r.kind == RESULT_KIND_INT);
+
+    Task *ret = task_alloc();
+    ret->kind = TASK_KIND_SEQUENCE;
+    ret->seq_count = 3;
+    ret->seq_index = 0;
+
+    int l = snprintf(log_buf, LOG_BUF_CAPACITY, "Counter: %d", r.x);
+    assert(log_buf[l] == '\0');
+    ret->seq[0] = task_log(log_buf);
+
+    ret->seq[1] = task_wait(1.0);
+
+    r.x++;
+    ret->seq[2] = task_const(r);
+
+    return ret;
+}
+
+bool condition(Result r) {
+    assert(r.state == STATE_DONE);
+    assert(r.kind == RESULT_KIND_INT);
+
+    return r.x < 10;
+}
+
 int main() {
     // We need to do this to initialize the pool allocator
     task_free_all();
@@ -518,11 +606,26 @@ int main() {
         .body = NULL,
         .build_body = repl,
     };
+    UNUSED(fifo);
+
+    Result result_zero = {
+        .state = STATE_DONE,
+        .kind = RESULT_KIND_INT,
+        .x = 0,
+    };
+    Task *task_zero = task_const(result_zero);
+
+    Task foo = {
+        .kind = TASK_KIND_ITERATE,
+        .iter_body = task_zero,
+        .iter_next = next,
+        .iter_condition = condition,
+    };
 
     printf("[INFO] starting server\n");
-    Result r = poll(&fifo);
+    Result r = poll(&foo);
     while (r.state != STATE_DONE) {
-        r = poll(&fifo);
+        r = poll(&foo);
     }
     printf("[INFO] finishing server\n");
     
