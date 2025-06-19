@@ -219,7 +219,6 @@ typedef enum {
     RESULT_KIND_BOOL,
     RESULT_KIND_INT,
     RESULT_KIND_INT_TUPLE,
-    RESULT_KIND_COMMAND,
 } Result_Kind;
 
 typedef struct {
@@ -229,7 +228,6 @@ typedef struct {
     bool bool_val;
     int x;
     int y;
-    char *command;
 
     // possible contexts
     bool has_fd;
@@ -266,7 +264,6 @@ typedef enum {
     TASK_KIND_WAIT,
     TASK_KIND_LOG,
     TASK_KIND_FIFO_CONTEXT,
-    TASK_KIND_FIFO_READ,
     TASK_KIND_FIFO_REPL,
     TASK_KIND_STRING_BUILDER_CONTEXT,
 } Task_Kind;
@@ -474,8 +471,6 @@ void destroy(Task *t) {
             break;
         case TASK_KIND_FIFO_CONTEXT:
             break;
-        case TASK_KIND_FIFO_READ:
-            UNIMPLEMENTED("destroy");
         case TASK_KIND_FIFO_REPL:
             break;
         case TASK_KIND_STRING_BUILDER_CONTEXT:
@@ -612,25 +607,6 @@ Result poll(Task *t) {
                     break;
             }
             return ret;
-        case TASK_KIND_FIFO_READ:
-            {
-                ssize_t r = read(t->file_desc, read_buf, READ_BUF_CAPACITY-1);
-                if (r == 0) {
-                    return RESULT_PENDING;
-                } else if (r == -1 && errno == EAGAIN) {
-                    return RESULT_PENDING;
-                } else if (r > 0) {
-                    assert(r < READ_BUF_CAPACITY-1);
-                    read_buf[r] = '\0';
-                    Result ret = RESULT_DONE;
-                    ret.kind = RESULT_KIND_COMMAND;
-                    ret.command = read_buf;
-                    return ret;
-                } else {
-                    printf("[ERROR] Could not read from file: %s\n", strerror(errno));
-                    exit(1);
-                }
-            }
         case TASK_KIND_FIFO_REPL:
             {
                 ssize_t r = read(t->file_desc, read_buf, READ_BUF_CAPACITY-1);
