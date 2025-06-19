@@ -5,6 +5,7 @@
 #include <string.h>
 #include <assert.h>
 #include <ctype.h>
+#include <stdarg.h>
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -43,6 +44,66 @@ void set_color(Color c) {
 
 void reset_color() {
     printf("\x1b[0m");
+}
+
+#define STRING_BUILDER_INITIAL_CAPACITY 16
+
+typedef struct {
+    char *str;
+    size_t capacity;
+    size_t count;
+} String_Builder;
+
+String_Builder string_builder_new() {
+    String_Builder sb;
+    sb.count = 0;
+    sb.capacity = STRING_BUILDER_INITIAL_CAPACITY;
+    sb.str = malloc(sizeof(char) * sb.capacity);
+    return sb;
+}
+
+void string_builder_destroy(String_Builder sb) {
+    free(sb.str);
+    sb.str = NULL;
+}
+
+void string_builder_clear(String_Builder *sb) {
+    sb->count = 0;
+}
+
+void string_builder_append(String_Builder *sb, char c) {
+    if (sb->count < sb->capacity) {
+        sb->str[sb->count] = c;
+        sb->count++;
+        return;
+    }
+    UNIMPLEMENTED("string_builder_append");
+}
+
+void string_builder_append_str(String_Builder *sb, char *str) {
+    while (*str != '\0') {
+        string_builder_append(sb, *str);
+        str++;
+    }
+}
+
+void string_builder_printf(String_Builder *sb, char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    int n = vsnprintf(NULL, 0, format, args);
+    va_end(args);
+    assert(n >= 0);
+
+    if ((size_t) n+1 > sb->capacity) {
+        UNIMPLEMENTED("string_builder_printf");
+    }
+
+    va_start(args, format);
+    n = vsnprintf(sb->str, n+1, format, args);
+    va_end(args);
+
+    assert(n >= 0);
+    sb->count = n;
 }
 
 typedef enum {
@@ -155,7 +216,9 @@ typedef enum {
 
 typedef enum {
     RESULT_KIND_VOID,
+    RESULT_KIND_BOOL,
     RESULT_KIND_INT,
+    RESULT_KIND_INT_TUPLE,
     RESULT_KIND_COMMAND,
     RESULT_KIND_FILE_DESCRIPTOR,
 } Result_Kind;
@@ -163,13 +226,19 @@ typedef enum {
 typedef struct {
     State state;
     Result_Kind kind;
+    bool bool_val;
     int x;
+    int y;
     char *command;
     int fd;
+    bool has_string_builder;
+    String_Builder *string_builder;
 } Result;
 
-#define RESULT_DONE    (Result) {.state = STATE_DONE, .kind = RESULT_KIND_VOID}
-#define RESULT_PENDING (Result) {.state = STATE_PENDING, .kind = RESULT_KIND_VOID}
+#define RESULT_DONE            (Result) {.state = STATE_DONE,    .kind = RESULT_KIND_VOID,                          .has_string_builder = false}
+#define RESULT_PENDING         (Result) {.state = STATE_PENDING, .kind = RESULT_KIND_VOID,                          .has_string_builder = false}
+#define RESULT_INT(X)          (Result) {.state = STATE_DONE,    .kind = RESULT_KIND_INT,       .x = (X),           .has_string_builder = false}
+#define RESULT_INT_TUPLE(X, Y) (Result) {.state = STATE_DONE,    .kind = RESULT_KIND_INT_TUPLE, .x = (X), .y = (Y), .has_string_builder = false}
 
 typedef enum {
     TASK_KIND_CONST,
@@ -177,11 +246,13 @@ typedef enum {
     TASK_KIND_PARALLEL,
     TASK_KIND_THEN,
     TASK_KIND_ITERATE,
+    TASK_KIND_LESS_THAN,
     TASK_KIND_WAIT,
     TASK_KIND_LOG,
     TASK_KIND_FIFO_CONTEXT,
     TASK_KIND_FIFO_READ,
     TASK_KIND_FIFO_REPL,
+    TASK_KIND_STRING_BUILDER_CONTEXT,
 } Task_Kind;
 
 typedef struct Task Task;
@@ -189,6 +260,7 @@ typedef Task *(*Then_Function)(Result);
 typedef bool (*Predicate)(Result);
 
 #define MAX_SEQ_COUNT 4
+#define MAX_PAR_COUNT 4
 
 struct Task {
     Task_Kind kind;
@@ -196,13 +268,6 @@ struct Task {
         // TASK_KIND_CONST
         struct {
             Result const_result;
-        };
-        // TASK_KIND_COUNTER
-        struct {
-            int counter_cur;
-            int counter_end;
-            char *counter_name;
-            Color color;
         };
         // TASK_KIND_SEQUENCE
         struct {
@@ -214,7 +279,7 @@ struct Task {
         struct {
             size_t par_count;
             size_t par_index;
-            Task **par;
+            Task *par[MAX_PAR_COUNT];
         };
         // TASK_KIND_THEN
         struct {
@@ -224,13 +289,16 @@ struct Task {
         };
         // TASK_KIND_ITERATE
         struct {
+            int iter_phase;
             Task *iter_body;
+            Task *iter_condition;
+            Result last;
             Then_Function iter_next;
-            Predicate iter_condition;
+            Then_Function iter_build_condition;
         };
         // TASK_KIND_LOG
         struct {
-            char *log_msg;
+            String_Builder *log_msg;
         };
         // TASK_KIND_WAIT
         struct {
@@ -248,10 +316,17 @@ struct Task {
             Then_Function build_body;
             int fifo_fd;
         };
+        // TASK_KIND_STRING_BUILDER_CONTEXT
+        struct {
+            Task *sb_head;
+            Task *sb_body;
+            Then_Function sb_build;
+            String_Builder sb;
+        };
     };
 };
 
-#define TASK_POOL_CAPACITY 8
+#define TASK_POOL_CAPACITY 16
 Task task_pool[TASK_POOL_CAPACITY];
 typedef struct Task_Free_Node Task_Free_Node;
 struct Task_Free_Node {
@@ -371,7 +446,10 @@ void destroy(Task *t) {
             break;
         case TASK_KIND_PARALLEL:
         case TASK_KIND_THEN:
+            UNIMPLEMENTED("destroy");
         case TASK_KIND_ITERATE:
+            break;
+        case TASK_KIND_LESS_THAN:
             UNIMPLEMENTED("destroy");
         case TASK_KIND_WAIT:
             break;
@@ -379,9 +457,13 @@ void destroy(Task *t) {
             log_buf[0] = '\0';
             break;
         case TASK_KIND_FIFO_CONTEXT:
+            break;
         case TASK_KIND_FIFO_READ:
-        case TASK_KIND_FIFO_REPL:
             UNIMPLEMENTED("destroy");
+        case TASK_KIND_FIFO_REPL:
+            break;
+        case TASK_KIND_STRING_BUILDER_CONTEXT:
+            break;
     }
     if (task_in_pool(t)) task_free(t);
 }
@@ -392,6 +474,7 @@ Result poll(Task *t) {
             return t->const_result;
         case TASK_KIND_SEQUENCE: 
             {
+                if (t->seq_count == 0) return RESULT_DONE;
                 assert(t->seq_index < t->seq_count);
                 Result r = poll(t->seq[t->seq_index]);
                 switch (r.state) {
@@ -412,6 +495,7 @@ Result poll(Task *t) {
                 Result r = poll(t->par[t->par_index]);
                 switch (r.state) {
                     case STATE_DONE:
+                        destroy(t->par[t->par_index]);
                         t->par[t->par_index] = t->par[t->par_count - 1];
                         t->par_count--;
                         if (t->par_count > 0) t->par_index %= t->par_count;
@@ -437,21 +521,45 @@ Result poll(Task *t) {
             }
             return poll(t->snd);
         case TASK_KIND_ITERATE:
-            assert(t->iter_body != NULL);
-            Result r = poll(t->iter_body);
-            switch (r.state) {
-                case STATE_DONE:
-                    destroy(t->iter_body);
-                    if (t->iter_condition(r)) {
-                        t->iter_body = t->iter_next(r);
-                        return RESULT_PENDING;
-                    } else {
-                        return r;
+            switch (t->iter_phase) {
+                case 0:
+                    assert(t->iter_body != NULL);
+                    t->last = poll(t->iter_body);
+                    switch (t->last.state) {
+                        case STATE_DONE:
+                            destroy(t->iter_body);
+                            t->iter_body = NULL;
+                            t->iter_phase = 1;
+                            t->iter_condition = t->iter_build_condition(t->last);
+                            break;
+                        case STATE_PENDING:
+                            break;
                     }
-                case STATE_PENDING:
-                    return r;
+                    return RESULT_PENDING;
+                case 1:
+                    assert(t->iter_condition != NULL);
+                    Result r = poll(t->iter_condition);
+                    switch (r.state) {
+                        case STATE_DONE:
+                            destroy(t->iter_condition);
+                            t->iter_condition = NULL;
+                            assert(r.kind == RESULT_KIND_BOOL);
+                            if (r.bool_val) {
+                                t->iter_phase = 0;
+                                t->iter_body = t->iter_next(t->last);
+                                return RESULT_PENDING;
+                            } else {
+                                assert(t->last.state == STATE_DONE);
+                                return t->last;
+                            }
+                        case STATE_PENDING:
+                            UNIMPLEMENTED("poll");
+                    }
+                    UNIMPLEMENTED("poll");
             }
-            UNREACHABLE("invalid Result_Kind");
+            UNREACHABLE("invalid phase");
+        case TASK_KIND_LESS_THAN:
+            UNIMPLEMENTED("poll");
         case TASK_KIND_WAIT:
             if (!t->started) {
                 t->start = time(NULL);
@@ -462,7 +570,8 @@ Result poll(Task *t) {
             if (difftime(now, t->start) >= t->duration) return RESULT_DONE;
             return RESULT_PENDING;
         case TASK_KIND_LOG:
-            printf("[LOG] %s\n", t->log_msg);
+            string_builder_append(t->log_msg, '\0');
+            printf("[LOG] %s\n", t->log_msg->str);
             return RESULT_DONE;
         case TASK_KIND_FIFO_CONTEXT:
             if (t->fifo_fd < 0) {
@@ -479,6 +588,7 @@ Result poll(Task *t) {
             Result ret = poll(t->body);
             switch (ret.state) {
                 case STATE_DONE:
+                    destroy(t->body);
                     close_and_unlink_fifo(t->fifo_fd);
                     printf("[INFO] closed fifo successfully\n");
                     break;
@@ -530,6 +640,36 @@ Result poll(Task *t) {
                     exit(1);
                 }
             }
+        case TASK_KIND_STRING_BUILDER_CONTEXT:
+            {
+                if (t->sb_body == NULL) {
+                    assert(t->sb_head != NULL);
+                    Result r = poll(t->sb_head);
+                    switch (r.state) {
+                        case STATE_DONE:
+                            destroy(t->sb_head);
+                            t->sb = string_builder_new();
+
+                            r.has_string_builder = true;
+                            r.string_builder = &t->sb;
+
+                            t->sb_body = t->sb_build(r);
+                            assert(t->sb_body != NULL);
+                            return RESULT_PENDING;
+                        case STATE_PENDING:
+                            return r;
+                    }
+                }
+                Result r = poll(t->sb_body);
+                switch (r.state) {
+                    case STATE_DONE:
+                        destroy(t->sb_body);
+                        string_builder_destroy(t->sb);
+                        break;
+                    case STATE_PENDING:
+                }
+                return r;
+            }
     }
     UNREACHABLE("poll");
 }
@@ -541,7 +681,7 @@ Task *task_const(Result r) {
     return ret;
 }
 
-Task *task_log(char *msg) {
+Task *task_log(String_Builder *msg) {
     Task *ret = task_alloc();
     ret->kind = TASK_KIND_LOG;
     ret->log_msg = msg;
@@ -557,6 +697,48 @@ Task *task_wait(double dur) {
     return ret;
 }
 
+Task *task_sequence() {
+    Task *ret = task_alloc();
+    ret->kind = TASK_KIND_SEQUENCE;
+    ret->seq_count = 0;
+    ret->seq_index = 0;
+    return ret;
+}
+
+void task_seq_append(Task *s, Task *t) {
+    assert(s->kind == TASK_KIND_SEQUENCE);
+    assert(s->seq_count < MAX_SEQ_COUNT); 
+
+    s->seq[s->seq_count] = t;
+    s->seq_count++;
+}
+
+Task *task_parallel() {
+    Task *ret = task_alloc();
+    ret->kind = TASK_KIND_PARALLEL;
+    ret->par_count = 0;
+    ret->par_index = 0;
+    return ret;
+}
+
+void task_par_append(Task *p, Task *t) {
+    assert(p->kind == TASK_KIND_PARALLEL);
+    assert(p->par_count < MAX_PAR_COUNT);
+
+    p->par[p->par_count] = t;
+    p->par_count++;
+}
+
+Task *task_iterate(Task *start, Then_Function next, Then_Function cond) {
+    Task *t = task_alloc();
+    t->kind = TASK_KIND_ITERATE;
+    t->iter_phase = 0;
+    t->iter_body = start;
+    t->iter_next = next;
+    t->iter_build_condition = cond;
+    return t;
+}
+
 Task *repl(Result r) {
     assert(r.state == STATE_DONE);
     assert(r.kind == RESULT_KIND_FILE_DESCRIPTOR);
@@ -568,32 +750,43 @@ Task *repl(Result r) {
     return repl;
 }
 
-Task *next(Result r) {
+Task *less_than(Result r) {
     assert(r.state == STATE_DONE);
-    assert(r.kind == RESULT_KIND_INT);
+    assert(r.kind == RESULT_KIND_INT_TUPLE);
 
-    Task *ret = task_alloc();
-    ret->kind = TASK_KIND_SEQUENCE;
-    ret->seq_count = 3;
-    ret->seq_index = 0;
+    int x = r.x;
+    int y = r.y;
 
-    int l = snprintf(log_buf, LOG_BUF_CAPACITY, "Counter: %d", r.x);
-    assert(log_buf[l] == '\0');
-    ret->seq[0] = task_log(log_buf);
+    r.kind = RESULT_KIND_BOOL;
+    r.bool_val = x < y;
+    return task_const(r);
+}
 
-    ret->seq[1] = task_wait(1.0);
+Task *counter_inc(Result r) {
+    assert(r.state == STATE_DONE);
+    assert(r.kind == RESULT_KIND_INT_TUPLE);
+    assert(r.has_string_builder);
+
+    Task *ret = task_sequence();
+
+    string_builder_clear(r.string_builder);
+    string_builder_printf(r.string_builder, "Counter: %d", r.x);
+    task_seq_append(ret, task_log(r.string_builder));
+
+    task_seq_append(ret, task_wait(1.0));
 
     r.x++;
-    ret->seq[2] = task_const(r);
+    task_seq_append(ret, task_const(r));
 
     return ret;
 }
 
-bool condition(Result r) {
+Task *counter(Result r) {
     assert(r.state == STATE_DONE);
-    assert(r.kind == RESULT_KIND_INT);
+    assert(r.has_string_builder);
+    assert(r.kind == RESULT_KIND_INT_TUPLE);
 
-    return r.x < 10;
+    return task_iterate(task_const(r), counter_inc, less_than);
 }
 
 int main() {
@@ -608,24 +801,28 @@ int main() {
     };
     UNUSED(fifo);
 
-    Result result_zero = {
-        .state = STATE_DONE,
-        .kind = RESULT_KIND_INT,
-        .x = 0,
-    };
-    Task *task_zero = task_const(result_zero);
-
     Task foo = {
-        .kind = TASK_KIND_ITERATE,
-        .iter_body = task_zero,
-        .iter_next = next,
-        .iter_condition = condition,
+        .kind = TASK_KIND_STRING_BUILDER_CONTEXT,
+        .sb_head = task_const(RESULT_INT_TUPLE(0, 5)),
+        .sb_body = NULL,
+        .sb_build = counter,
     };
+
+    Task bar = {
+        .kind = TASK_KIND_STRING_BUILDER_CONTEXT,
+        .sb_head = task_const(RESULT_INT_TUPLE(20, 30)),
+        .sb_body = NULL,
+        .sb_build = counter,
+    };
+
+    Task *baz = task_parallel();
+    task_par_append(baz, &foo);
+    task_par_append(baz, &bar);
 
     printf("[INFO] starting server\n");
-    Result r = poll(&foo);
+    Result r = poll(baz);
     while (r.state != STATE_DONE) {
-        r = poll(&foo);
+        r = poll(baz);
     }
     printf("[INFO] finishing server\n");
     
