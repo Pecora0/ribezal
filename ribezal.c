@@ -220,25 +220,41 @@ typedef enum {
     RESULT_KIND_INT,
     RESULT_KIND_INT_TUPLE,
     RESULT_KIND_COMMAND,
-    RESULT_KIND_FILE_DESCRIPTOR,
 } Result_Kind;
 
 typedef struct {
     State state;
     Result_Kind kind;
+    // possible values
     bool bool_val;
     int x;
     int y;
     char *command;
+
+    // possible contexts
+    bool has_fd;
     int fd;
     bool has_string_builder;
     String_Builder *string_builder;
 } Result;
 
-#define RESULT_DONE            (Result) {.state = STATE_DONE,    .kind = RESULT_KIND_VOID,                          .has_string_builder = false}
-#define RESULT_PENDING         (Result) {.state = STATE_PENDING, .kind = RESULT_KIND_VOID,                          .has_string_builder = false}
-#define RESULT_INT(X)          (Result) {.state = STATE_DONE,    .kind = RESULT_KIND_INT,       .x = (X),           .has_string_builder = false}
-#define RESULT_INT_TUPLE(X, Y) (Result) {.state = STATE_DONE,    .kind = RESULT_KIND_INT_TUPLE, .x = (X), .y = (Y), .has_string_builder = false}
+#define RESULT_DONE    (Result) {.state = STATE_DONE,    .kind = RESULT_KIND_VOID, .has_string_builder = false, .has_fd = false}
+#define RESULT_PENDING (Result) {.state = STATE_PENDING, .kind = RESULT_KIND_VOID, .has_string_builder = false, .has_fd = false}
+
+Result result_int(int x) {
+    Result r = RESULT_DONE;
+    r.kind = RESULT_KIND_INT;
+    r.x = x;
+    return r;
+}
+
+Result result_int_tuple(int x, int y) {
+    Result r = RESULT_DONE;
+    r.kind = RESULT_KIND_INT_TUPLE;
+    r.x = x;
+    r.y = y;
+    return r;
+}
 
 typedef enum {
     TASK_KIND_CONST,
@@ -579,7 +595,7 @@ Result poll(Task *t) {
                 printf("[INFO] opened fifo successfully\n");
 
                 Result ret = RESULT_DONE;
-                ret.kind = RESULT_KIND_FILE_DESCRIPTOR;
+                ret.has_fd = true;
                 ret.fd = t->fifo_fd;
                 t->body = t->build_body(ret);
                 return RESULT_PENDING;
@@ -741,7 +757,7 @@ Task *task_iterate(Task *start, Then_Function next, Then_Function cond) {
 
 Task *repl(Result r) {
     assert(r.state == STATE_DONE);
-    assert(r.kind == RESULT_KIND_FILE_DESCRIPTOR);
+    assert(r.has_fd);
 
     Task *repl = task_alloc();
     repl->kind = TASK_KIND_FIFO_REPL;
@@ -803,21 +819,22 @@ int main() {
 
     Task foo = {
         .kind = TASK_KIND_STRING_BUILDER_CONTEXT,
-        .sb_head = task_const(RESULT_INT_TUPLE(0, 5)),
+        .sb_head = task_const(result_int_tuple(0, 5)),
         .sb_body = NULL,
         .sb_build = counter,
     };
 
     Task bar = {
         .kind = TASK_KIND_STRING_BUILDER_CONTEXT,
-        .sb_head = task_const(RESULT_INT_TUPLE(20, 30)),
+        .sb_head = task_const(result_int_tuple(20, 30)),
         .sb_body = NULL,
         .sb_build = counter,
     };
 
     Task *baz = task_parallel();
-    task_par_append(baz, &foo);
-    task_par_append(baz, &bar);
+    UNUSED(foo);
+    UNUSED(bar);
+    task_par_append(baz, &fifo);
 
     printf("[INFO] starting server\n");
     Result r = poll(baz);
