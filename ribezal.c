@@ -87,7 +87,7 @@ void string_builder_append_str(String_Builder *sb, char *str) {
     }
 }
 
-void string_builder_printf(String_Builder *sb, char *format, ...) {
+CHECK_PRINTF_FMT(2, 3) int string_builder_printf(String_Builder *sb, char *format, ...) {
     va_list args;
     va_start(args, format);
     int n = vsnprintf(NULL, 0, format, args);
@@ -104,6 +104,7 @@ void string_builder_printf(String_Builder *sb, char *format, ...) {
 
     assert(n >= 0);
     sb->count = n;
+    return n;
 }
 
 typedef enum {
@@ -447,10 +448,6 @@ Reply_Kind execute(char *prog) {
 #define READ_BUF_CAPACITY 32
 char read_buf[READ_BUF_CAPACITY];
 
-// TODO: multiple log tasks can use this so every log task should have its own
-#define LOG_BUF_CAPACITY 32
-char log_buf[LOG_BUF_CAPACITY];
-
 void destroy(Task *t) {
     switch (t->kind) {
         case TASK_KIND_CONST:
@@ -467,7 +464,6 @@ void destroy(Task *t) {
         case TASK_KIND_WAIT:
             break;
         case TASK_KIND_LOG:
-            log_buf[0] = '\0';
             break;
         case TASK_KIND_FIFO_CONTEXT:
             break;

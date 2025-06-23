@@ -10,4 +10,10 @@
 
 #define UNIMPLEMENTED(message) do { fprintf(stderr, "%s:%d: UNIMPLEMENTED: %s\n", __FILE__, __LINE__, message); abort(); } while(0)
 
+#if defined(__GNUC__) || defined(__clang__)
+#define CHECK_PRINTF_FMT(a, b) __attribute__ ((format (printf, a, b)))
+#else
+#define CHECK_PRINTF_FMT(...)
+#endif
+
 #endif // DEVUTILS_H
