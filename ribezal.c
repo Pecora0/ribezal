@@ -14,6 +14,9 @@
 
 #include "devutils.h"
 
+// thirdparty
+#include <curl/curl.h>
+
 typedef enum {
     WHITE,
     RED,
@@ -47,6 +50,7 @@ void reset_color() {
 }
 
 #define STRING_BUILDER_INITIAL_CAPACITY 16
+#define STRING_BUILDER_MAXIMUM_CAPACITY 1024
 
 typedef struct {
     char *str;
@@ -62,7 +66,7 @@ String_Builder string_builder_new() {
     return sb;
 }
 
-void string_builder_destroy(String_Builder sb) {
+void string_builder_task_destroy(String_Builder sb) {
     free(sb.str);
     sb.str = NULL;
 }
@@ -71,13 +75,21 @@ void string_builder_clear(String_Builder *sb) {
     sb->count = 0;
 }
 
-void string_builder_append(String_Builder *sb, char c) {
-    if (sb->count < sb->capacity) {
-        sb->str[sb->count] = c;
-        sb->count++;
-        return;
+void string_builder_grow(String_Builder *sb) {
+    size_t new_capacity = 2*sb->capacity;
+    assert(new_capacity <= STRING_BUILDER_MAXIMUM_CAPACITY);
+    sb->str = realloc(sb->str, new_capacity * sizeof(char));
+    if (sb->str == NULL) {
+        UNIMPLEMENTED("string_builder_grow");
     }
-    UNIMPLEMENTED("string_builder_append");
+    sb->capacity = new_capacity;
+}
+
+void string_builder_append(String_Builder *sb, char c) {
+    while (sb->count >= sb->capacity) string_builder_grow(sb);
+    sb->str[sb->count] = c;
+    sb->count++;
+    return;
 }
 
 void string_builder_append_str(String_Builder *sb, char *str) {
@@ -255,6 +267,25 @@ Result result_int_tuple(int x, int y) {
     return r;
 }
 
+typedef struct {
+    bool in_global_curl;
+    bool in_multi_curl;
+    bool in_easy_curl;
+    CURLM *multi_handle;
+    CURL *easy_handle;
+} Context;
+
+Context context_new() {
+    Context c = {
+        .in_global_curl = false,
+        .in_multi_curl = false,
+        .in_easy_curl = false,
+        .multi_handle = NULL,
+        .easy_handle = NULL,
+    };
+    return c;
+}
+
 typedef enum {
     TASK_KIND_CONST,
     TASK_KIND_SEQUENCE,
@@ -267,6 +298,10 @@ typedef enum {
     TASK_KIND_FIFO_CONTEXT,
     TASK_KIND_FIFO_REPL,
     TASK_KIND_STRING_BUILDER_CONTEXT,
+    TASK_KIND_CURL_GLOBAL_CONTEXT,
+    TASK_KIND_CURL_MULTI_CONTEXT,
+    TASK_KIND_CURL_EASY_CONTEXT,
+    TASK_KIND_CURL_PERFORM,
 } Task_Kind;
 
 typedef struct Task Task;
@@ -336,6 +371,21 @@ struct Task {
             Task *sb_body;
             Then_Function sb_build;
             String_Builder sb;
+        };
+        // TASK_KIND_CURL_GLOBAL_CONTEXT
+        struct {
+            bool curl_global_is_init;
+            Task *curl_global_body;
+        };
+        // TASK_KIND_CURL_MULTI_CONTEXT
+        struct {
+            bool curl_multi_is_init;
+            Task *curl_multi_body;
+        };
+        // TASK_KIND_CURL_EASY_CONTEXT
+        struct {
+            bool curl_easy_is_init;
+            Task *curl_easy_body;
         };
     };
 };
@@ -448,7 +498,7 @@ Reply_Kind execute(char *prog) {
 #define READ_BUF_CAPACITY 32
 char read_buf[READ_BUF_CAPACITY];
 
-void destroy(Task *t) {
+void task_destroy(Task *t) {
     switch (t->kind) {
         case TASK_KIND_CONST:
             break;
@@ -456,11 +506,11 @@ void destroy(Task *t) {
             break;
         case TASK_KIND_PARALLEL:
         case TASK_KIND_THEN:
-            UNIMPLEMENTED("destroy");
+            UNIMPLEMENTED("task_destroy");
         case TASK_KIND_ITERATE:
             break;
         case TASK_KIND_LESS_THAN:
-            UNIMPLEMENTED("destroy");
+            UNIMPLEMENTED("task_destroy");
         case TASK_KIND_WAIT:
             break;
         case TASK_KIND_LOG:
@@ -471,11 +521,20 @@ void destroy(Task *t) {
             break;
         case TASK_KIND_STRING_BUILDER_CONTEXT:
             break;
+        case TASK_KIND_CURL_GLOBAL_CONTEXT:
+            break;
+        case TASK_KIND_CURL_MULTI_CONTEXT:
+            break;
+        case TASK_KIND_CURL_EASY_CONTEXT:
+            break;
+        case TASK_KIND_CURL_PERFORM:
+            break;
     }
     if (task_in_pool(t)) task_free(t);
 }
 
-Result poll(Task *t) {
+Result task_poll(Task *t, Context *ctx) {
+    assert(t != NULL);
     switch (t->kind) {
         case TASK_KIND_CONST:
             return t->const_result;
@@ -483,10 +542,10 @@ Result poll(Task *t) {
             {
                 if (t->seq_count == 0) return RESULT_DONE;
                 assert(t->seq_index < t->seq_count);
-                Result r = poll(t->seq[t->seq_index]);
+                Result r = task_poll(t->seq[t->seq_index], ctx);
                 switch (r.state) {
                     case STATE_DONE:
-                        destroy(t->seq[t->seq_index]);
+                        task_destroy(t->seq[t->seq_index]);
                         t->seq_index++;
 
                         // if this was the last Task in the sequence we should return its result
@@ -499,10 +558,10 @@ Result poll(Task *t) {
         case TASK_KIND_PARALLEL:
             {
                 if (t->par_count == 0) return RESULT_DONE;
-                Result r = poll(t->par[t->par_index]);
+                Result r = task_poll(t->par[t->par_index], ctx);
                 switch (r.state) {
                     case STATE_DONE:
-                        destroy(t->par[t->par_index]);
+                        task_destroy(t->par[t->par_index]);
                         t->par[t->par_index] = t->par[t->par_count - 1];
                         t->par_count--;
                         if (t->par_count > 0) t->par_index %= t->par_count;
@@ -516,7 +575,7 @@ Result poll(Task *t) {
             }
         case TASK_KIND_THEN:
             if (t->snd == NULL) {
-                Result r = poll(t->fst);
+                Result r = task_poll(t->fst, ctx);
                 switch (r.state) {
                     case STATE_DONE:
                         t->snd = t->then(r);
@@ -526,15 +585,15 @@ Result poll(Task *t) {
                 }
                 return RESULT_PENDING;
             }
-            return poll(t->snd);
+            return task_poll(t->snd, ctx);
         case TASK_KIND_ITERATE:
             switch (t->iter_phase) {
                 case 0:
                     assert(t->iter_body != NULL);
-                    t->last = poll(t->iter_body);
+                    t->last = task_poll(t->iter_body, ctx);
                     switch (t->last.state) {
                         case STATE_DONE:
-                            destroy(t->iter_body);
+                            task_destroy(t->iter_body);
                             t->iter_body = NULL;
                             t->iter_phase = 1;
                             t->iter_condition = t->iter_build_condition(t->last);
@@ -545,10 +604,10 @@ Result poll(Task *t) {
                     return RESULT_PENDING;
                 case 1:
                     assert(t->iter_condition != NULL);
-                    Result r = poll(t->iter_condition);
+                    Result r = task_poll(t->iter_condition, ctx);
                     switch (r.state) {
                         case STATE_DONE:
-                            destroy(t->iter_condition);
+                            task_destroy(t->iter_condition);
                             t->iter_condition = NULL;
                             assert(r.kind == RESULT_KIND_BOOL);
                             if (r.bool_val) {
@@ -560,13 +619,13 @@ Result poll(Task *t) {
                                 return t->last;
                             }
                         case STATE_PENDING:
-                            UNIMPLEMENTED("poll");
+                            UNIMPLEMENTED("task_poll");
                     }
-                    UNIMPLEMENTED("poll");
+                    UNIMPLEMENTED("task_poll");
             }
             UNREACHABLE("invalid phase");
         case TASK_KIND_LESS_THAN:
-            UNIMPLEMENTED("poll");
+            UNIMPLEMENTED("task_poll");
         case TASK_KIND_WAIT:
             if (!t->started) {
                 t->start = time(NULL);
@@ -592,10 +651,10 @@ Result poll(Task *t) {
                 return RESULT_PENDING;
             }
             assert(t->body != NULL);
-            Result ret = poll(t->body);
+            Result ret = task_poll(t->body, ctx);
             switch (ret.state) {
                 case STATE_DONE:
-                    destroy(t->body);
+                    task_destroy(t->body);
                     close_and_unlink_fifo(t->fifo_fd);
                     printf("[INFO] closed fifo successfully\n");
                     break;
@@ -632,10 +691,10 @@ Result poll(Task *t) {
             {
                 if (t->sb_body == NULL) {
                     assert(t->sb_head != NULL);
-                    Result r = poll(t->sb_head);
+                    Result r = task_poll(t->sb_head, ctx);
                     switch (r.state) {
                         case STATE_DONE:
-                            destroy(t->sb_head);
+                            task_destroy(t->sb_head);
                             t->sb = string_builder_new();
 
                             r.has_string_builder = true;
@@ -648,18 +707,108 @@ Result poll(Task *t) {
                             return r;
                     }
                 }
-                Result r = poll(t->sb_body);
+                Result r = task_poll(t->sb_body, ctx);
                 switch (r.state) {
                     case STATE_DONE:
-                        destroy(t->sb_body);
-                        string_builder_destroy(t->sb);
+                        task_destroy(t->sb_body);
+                        string_builder_task_destroy(t->sb);
                         break;
                     case STATE_PENDING:
                 }
                 return r;
             }
+        case TASK_KIND_CURL_GLOBAL_CONTEXT:
+            {
+                if (!t->curl_global_is_init) {
+                    CURLcode r = curl_global_init(CURL_GLOBAL_DEFAULT);
+                    if (r != 0) {
+                        UNIMPLEMENTED("task_poll");
+                    }
+                    t->curl_global_is_init = true;
+                    ctx->in_global_curl = true;
+                }
+                Result r = task_poll(t->curl_global_body, ctx);
+                switch (r.state) {
+                    case STATE_DONE:
+                        task_destroy(t->curl_global_body);
+                        curl_global_cleanup();
+                        ctx->in_global_curl = false;
+                        break;
+                    case STATE_PENDING:
+                        break;
+                }
+                return r;
+            }
+        case TASK_KIND_CURL_MULTI_CONTEXT:
+            {
+                assert(ctx->in_global_curl);
+                if (!t->curl_multi_is_init) {
+                    ctx->multi_handle = curl_multi_init();
+                    if (ctx->multi_handle == NULL) {
+                        UNIMPLEMENTED("task_poll");
+                    }
+                    t->curl_multi_is_init = true;
+                    ctx->in_multi_curl = true;
+                }
+                assert(ctx->multi_handle != NULL);
+                Result r = task_poll(t->curl_multi_body, ctx);
+                switch (r.state) {
+                    case STATE_DONE:
+                        task_destroy(t->curl_multi_body);
+                        CURLMcode code = curl_multi_cleanup(ctx->multi_handle);
+                        if (code != CURLM_OK) {
+                            UNIMPLEMENTED("task_poll");
+                        }
+                        ctx->in_multi_curl = false;
+                        break;
+                    case STATE_PENDING:
+                        UNIMPLEMENTED("task_poll");
+                }
+                return r;
+            }
+        case TASK_KIND_CURL_EASY_CONTEXT:
+            assert(ctx->in_global_curl);
+            if (ctx->in_multi_curl) {
+                UNIMPLEMENTED("task_poll");
+            } else {
+                if (!t->curl_easy_is_init) {
+                    ctx->easy_handle = curl_easy_init();
+                    if (ctx->easy_handle == NULL) {
+                        UNIMPLEMENTED("task_poll");
+                    }
+                    CURLcode code = curl_easy_setopt(ctx->easy_handle, CURLOPT_URL, "https://example.com");
+                    if (code != CURLE_OK) {
+                        UNIMPLEMENTED("task_poll");
+                    }
+                    
+                    t->curl_easy_is_init = true;
+                    ctx->in_easy_curl = true;
+                }
+                assert(t->curl_easy_body != NULL);
+                Result r = task_poll(t->curl_easy_body, ctx);
+                switch (r.state) {
+                    case STATE_DONE:
+                        task_destroy(t->curl_easy_body);
+                        curl_easy_cleanup(ctx->easy_handle);
+                        ctx->in_easy_curl = false;
+                        break;
+                    case STATE_PENDING:
+                        break;
+                }
+                return r;
+            }
+        case TASK_KIND_CURL_PERFORM:
+            assert(ctx->in_easy_curl);
+            printf("[INFO] performing request\n");
+            CURLcode code;
+            code = curl_easy_perform(ctx->easy_handle);
+            printf("[INFO] performed request\n");
+            if (code != CURLE_OK) {
+                UNIMPLEMENTED("task_poll");
+            }
+            return RESULT_DONE;
     }
-    UNREACHABLE("poll");
+    UNREACHABLE("task_poll");
 }
 
 Task *task_const(Result r) {
@@ -802,16 +951,41 @@ int main() {
         .sb_body = NULL,
         .sb_build = counter,
     };
+    
+    String_Builder msg = string_builder_new();
+    string_builder_append_str(&msg, "inside curl easy");
+
+    Task request = {
+        .kind = TASK_KIND_CURL_PERFORM,
+    };
+
+    Task curl_easy = {
+        .kind = TASK_KIND_CURL_EASY_CONTEXT,
+        .curl_easy_is_init = false,
+        .curl_easy_body = task_sequence(),
+    };
+
+    task_seq_append(curl_easy.curl_easy_body, task_log(&msg));
+    task_seq_append(curl_easy.curl_easy_body, &request);
+
+    Task curl_global = {
+        .kind = TASK_KIND_CURL_GLOBAL_CONTEXT,
+        .curl_global_is_init = false,
+        .curl_global_body = &curl_easy,
+    };
 
     Task *baz = task_parallel();
     UNUSED(foo);
     UNUSED(bar);
-    task_par_append(baz, &fifo);
+    UNUSED(fifo);
+    task_par_append(baz, &curl_global);
+
+    Context ctx = context_new();
 
     printf("[INFO] starting server\n");
-    Result r = poll(baz);
+    Result r = task_poll(baz, &ctx);
     while (r.state != STATE_DONE) {
-        r = poll(baz);
+        r = task_poll(baz, &ctx);
     }
     printf("[INFO] finishing server\n");
     
