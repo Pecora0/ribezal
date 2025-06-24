@@ -220,6 +220,7 @@ void close_and_unlink_fifo(int fd) {
     }
 }
 
+// TODO: error state
 typedef enum {
     STATE_DONE,
     STATE_PENDING,
@@ -339,6 +340,7 @@ struct Task {
             size_t par_count;
             size_t par_index;
             Task *par[MAX_PAR_COUNT];
+            Context sub_ctx[MAX_PAR_COUNT];
         };
         // TASK_KIND_THEN
         struct {
@@ -574,7 +576,9 @@ Result task_poll(Task *t, Context *ctx) {
         case TASK_KIND_PARALLEL:
             {
                 if (t->par_count == 0) return RESULT_DONE;
-                Result r = task_poll(t->par[t->par_index], ctx);
+                // TODO: ctx needs to be copied for every child task such that they can not interfer with each other
+                // at the moment we just make a new context for every child
+                Result r = task_poll(t->par[t->par_index], t->sub_ctx + t->par_index);
                 switch (r.state) {
                     case STATE_DONE:
                         task_destroy(t->par[t->par_index]);
@@ -719,13 +723,18 @@ Result task_poll(Task *t, Context *ctx) {
                     t->sb_is_init = true;
                     ctx->string_builder = &t->sb;
                     ctx->in_string_builder = true;
+                    printf("[INFO] initialized string builder %p\n", ctx->string_builder);
                 }
+                assert(ctx->string_builder != NULL);
                 assert(t->sb_body != NULL);
                 Result r = task_poll(t->sb_body, ctx);
                 switch (r.state) {
                     case STATE_DONE:
                         task_destroy(t->sb_body);
+                        t->sb_body = NULL;
                         string_builder_destroy(t->sb);
+                        printf("[INFO] deconstructed string builder %p\n", ctx->string_builder);
+                        ctx->string_builder = NULL;
                         break;
                     case STATE_PENDING:
                 }
@@ -884,6 +893,7 @@ void task_par_append(Task *p, Task *t) {
     assert(p->par_count < MAX_PAR_COUNT);
 
     p->par[p->par_count] = t;
+    p->sub_ctx[p->par_count] = context_new();
     p->par_count++;
 }
 
