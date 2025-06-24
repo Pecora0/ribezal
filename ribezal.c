@@ -296,6 +296,27 @@ Context context_new() {
     return c;
 }
 
+void context_add(Context *this, Context other) {
+    UNUSED(this);
+    if (other.in_string_builder) {
+        if (this->in_string_builder) {
+            UNIMPLEMENTED("context_add");
+        } else {
+            this->in_string_builder = true;
+            this->string_builder = other.string_builder;
+        }
+    }
+    if (other.in_global_curl) {
+        UNIMPLEMENTED("context_add");
+    }
+    if (other.in_multi_curl) {
+        UNIMPLEMENTED("context_add");
+    }
+    if (other.in_easy_curl) {
+        UNIMPLEMENTED("context_add");
+    }
+}
+
 typedef enum {
     TASK_KIND_CONST,
     TASK_KIND_SEQUENCE,
@@ -576,8 +597,7 @@ Result task_poll(Task *t, Context *ctx) {
         case TASK_KIND_PARALLEL:
             {
                 if (t->par_count == 0) return RESULT_DONE;
-                // TODO: ctx needs to be copied for every child task such that they can not interfer with each other
-                // at the moment we just make a new context for every child
+                context_add(t->sub_ctx + t->par_index, *ctx);
                 Result r = task_poll(t->par[t->par_index], t->sub_ctx + t->par_index);
                 switch (r.state) {
                     case STATE_DONE:
@@ -719,10 +739,14 @@ Result task_poll(Task *t, Context *ctx) {
         case TASK_KIND_STRING_BUILDER_CONTEXT:
             {
                 if (!t->sb_is_init) {
+                    assert(!ctx->in_string_builder);
                     t->sb = string_builder_new();
                     t->sb_is_init = true;
-                    ctx->string_builder = &t->sb;
-                    ctx->in_string_builder = true;
+                    Context new_ctx = {
+                        .in_string_builder = true,
+                        .string_builder = &t->sb,
+                    };
+                    context_add(ctx, new_ctx);
                     printf("[INFO] initialized string builder %p\n", ctx->string_builder);
                 }
                 assert(ctx->string_builder != NULL);
@@ -734,6 +758,7 @@ Result task_poll(Task *t, Context *ctx) {
                         t->sb_body = NULL;
                         string_builder_destroy(t->sb);
                         printf("[INFO] deconstructed string builder %p\n", ctx->string_builder);
+                        ctx->in_string_builder = false;
                         ctx->string_builder = NULL;
                         break;
                     case STATE_PENDING:
