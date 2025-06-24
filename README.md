@@ -37,6 +37,7 @@ There are the following keywords:
 - `drop`
 - `clear`
 - `+`, `-`, `*`, `/`
+- request
 
 ## Shoutouts
 

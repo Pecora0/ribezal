@@ -172,6 +172,12 @@ bool stack_two_int() {
     return (stack[i1].kind == STACK_VALUE_INT) && (stack[i2].kind == STACK_VALUE_INT);
 }
 
+bool stack_string() {
+    if (stack_count < 1) return false;
+    size_t i = stack_count-1;
+    return stack[i].kind == STACK_VALUE_STRING;
+}
+
 void stack_print() {
     printf("[");
     for (size_t i=0; i+1<stack_count; i++) {
@@ -426,6 +432,8 @@ struct Task {
     };
 };
 
+Task *runner = NULL;
+
 #define TASK_POOL_CAPACITY 24
 Task task_pool[TASK_POOL_CAPACITY];
 typedef struct Task_Free_Node Task_Free_Node;
@@ -469,10 +477,45 @@ void task_free(Task *t) {
     task_pool_head = tfree;
 }
 
+Task *task_log(Result r) {
+    assert(r.state == STATE_DONE);
+    assert(r.kind == RESULT_KIND_STRING);
+    Task *ret = task_alloc();
+    ret->kind = TASK_KIND_LOG;
+    ret->log_msg = r.string;
+    return ret;
+}
+
+void task_par_append(Task *p, Task *t) {
+    assert(p->kind == TASK_KIND_PARALLEL);
+    assert(p->par_count < MAX_PAR_COUNT);
+
+    p->par[p->par_count] = t;
+    p->sub_ctx[p->par_count] = context_new();
+    p->par_count++;
+}
+
+Task *task_curl_easy_context(Task *body) {
+    Task *t = task_alloc();
+    t->kind = TASK_KIND_CURL_EASY_CONTEXT;
+    t->curl_easy_is_init = false;
+    t->curl_easy_body = body;
+    return t;
+}
+
+Task *task_curl_global_context(Task *body) {
+    Task *t = task_alloc();
+    t->kind = TASK_KIND_CURL_GLOBAL_CONTEXT;
+    t->curl_global_is_init = false;
+    t->curl_global_body = body;
+    return t;
+}
+
 typedef enum {
     REPLY_CLOSE,
     REPLY_ACK,
     REPLY_REJECT,
+    REPLY_ERROR,
 } Reply_Kind;
 
 #define SPACES " \f\n\r\t\v"
@@ -491,6 +534,18 @@ Reply_Kind execute(char *prog) {
             stack_drop();
         } else if (strcmp(token, "clear") == 0) {
             while (stack_count > 0) stack_drop();
+        } else if (strcmp(token, "request") == 0) {
+            if (stack_string()) {
+                Task *helper = task_alloc();
+                helper->kind = TASK_KIND_CURL_PERFORM;
+                task_par_append(runner, 
+                        task_curl_global_context(
+                            task_curl_easy_context(helper)
+                            )
+                        );
+                return REPLY_ACK;
+            }
+            return REPLY_ERROR;
         } else if (strcmp(token, "+") == 0) {
             if (stack_two_int()) {
                 int x = stack[stack_count-1].x;
@@ -729,6 +784,9 @@ Result task_poll(Task *t, Context *ctx) {
                             return RESULT_PENDING;
                         case REPLY_ACK:
                             return RESULT_PENDING;
+                        case REPLY_ERROR:
+                            printf("Command caused non-fatal error\n");
+                            return RESULT_PENDING;
                     }
                     UNREACHABLE("invalid Result_Kind");
                 } else {
@@ -871,15 +929,6 @@ Task *task_const(Result r) {
     return ret;
 }
 
-Task *task_log(Result r) {
-    assert(r.state == STATE_DONE);
-    assert(r.kind == RESULT_KIND_STRING);
-    Task *ret = task_alloc();
-    ret->kind = TASK_KIND_LOG;
-    ret->log_msg = r.string;
-    return ret;
-}
-
 Task *task_wait(double dur) {
     Task *ret = task_alloc();
     ret->kind = TASK_KIND_WAIT;
@@ -911,15 +960,6 @@ Task *task_parallel() {
     ret->par_count = 0;
     ret->par_index = 0;
     return ret;
-}
-
-void task_par_append(Task *p, Task *t) {
-    assert(p->kind == TASK_KIND_PARALLEL);
-    assert(p->par_count < MAX_PAR_COUNT);
-
-    p->par[p->par_count] = t;
-    p->sub_ctx[p->par_count] = context_new();
-    p->par_count++;
 }
 
 Task *task_iterate(Task *start, Then_Function next, Then_Function cond) {
@@ -999,17 +1039,27 @@ int main() {
     // We need to do this to initialize the pool allocator
     task_free_all();
 
+    // runner is a global task of kind PARALLEL that all can acces
+    runner = task_parallel();
+
+    // /*
     Task fifo = {
         .kind = TASK_KIND_FIFO_CONTEXT,
         .fifo_fd = -1,
         .fifo_body = NULL,
         .build_body = repl,
     };
-    UNUSED(fifo);
+    task_par_append(runner, &fifo);
+    // */
 
+    /*
     Task *foo = task_iterate(task_const(result_int_tuple( 0,  5)), counter_inc, less_than);
+    task_par_append(runner, foo);
     Task *bar = task_iterate(task_const(result_int_tuple(20, 30)), counter_inc, less_than);
+    task_par_append(runner, bar);
+    // */
     
+    /*
     String_Builder msg = string_builder_new();
     string_builder_append_str(&msg, "inside curl easy");
 
@@ -1017,36 +1067,22 @@ int main() {
         .kind = TASK_KIND_CURL_PERFORM,
     };
 
-    Task curl_easy = {
-        .kind = TASK_KIND_CURL_EASY_CONTEXT,
-        .curl_easy_is_init = false,
-        .curl_easy_body = task_sequence(),
-    };
+    Task *curl_easy = task_curl_easy_context(task_sequence());
 
-    task_seq_append(curl_easy.curl_easy_body, task_log(result_string(&msg)));
-    task_seq_append(curl_easy.curl_easy_body, &request);
+    task_seq_append(curl_easy->curl_easy_body, task_log(result_string(&msg)));
+    task_seq_append(curl_easy->curl_easy_body, &request);
 
-    Task curl_global = {
-        .kind = TASK_KIND_CURL_GLOBAL_CONTEXT,
-        .curl_global_is_init = false,
-        .curl_global_body = &curl_easy,
-    };
+    Task *curl_global = task_curl_global_context(curl_easy);
 
-    Task *baz = task_parallel();
-    UNUSED(foo);
-    UNUSED(bar);
-    UNUSED(fifo);
-    UNUSED(curl_global);
-    task_par_append(baz, foo);
-    task_par_append(baz, bar);
-    //task_par_append(baz, &curl_global);
+    task_par_append(runner, curl_global);
+    // */
 
     Context ctx = context_new();
 
     printf("[INFO] starting server\n");
-    Result r = task_poll(baz, &ctx);
+    Result r = task_poll(runner, &ctx);
     while (r.state != STATE_DONE) {
-        r = task_poll(baz, &ctx);
+        r = task_poll(runner, &ctx);
     }
     printf("[INFO] finishing server\n");
     
