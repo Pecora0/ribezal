@@ -66,7 +66,7 @@ String_Builder string_builder_new() {
     return sb;
 }
 
-void string_builder_task_destroy(String_Builder sb) {
+void string_builder_destroy(String_Builder sb) {
     free(sb.str);
     sb.str = NULL;
 }
@@ -711,7 +711,7 @@ Result task_poll(Task *t, Context *ctx) {
                 switch (r.state) {
                     case STATE_DONE:
                         task_destroy(t->sb_body);
-                        string_builder_task_destroy(t->sb);
+                        string_builder_destroy(t->sb);
                         break;
                     case STATE_PENDING:
                 }
