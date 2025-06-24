@@ -106,9 +106,7 @@ CHECK_PRINTF_FMT(2, 3) int string_builder_printf(String_Builder *sb, char *forma
     va_end(args);
     assert(n >= 0);
 
-    if ((size_t) n+1 > sb->capacity) {
-        UNIMPLEMENTED("string_builder_printf");
-    }
+    while ((size_t) n+1 > sb->capacity) string_builder_grow(sb);
 
     va_start(args, format);
     n = vsnprintf(sb->str, n+1, format, args);
@@ -232,6 +230,7 @@ typedef enum {
     RESULT_KIND_BOOL,
     RESULT_KIND_INT,
     RESULT_KIND_INT_TUPLE,
+    RESULT_KIND_STRING,
 } Result_Kind;
 
 typedef struct {
@@ -241,16 +240,15 @@ typedef struct {
     bool bool_val;
     int x;
     int y;
+    String_Builder *string;
 
     // possible contexts
     bool has_fd;
     int fd;
-    bool has_string_builder;
-    String_Builder *string_builder;
 } Result;
 
-#define RESULT_DONE    (Result) {.state = STATE_DONE,    .kind = RESULT_KIND_VOID, .has_string_builder = false, .has_fd = false}
-#define RESULT_PENDING (Result) {.state = STATE_PENDING, .kind = RESULT_KIND_VOID, .has_string_builder = false, .has_fd = false}
+#define RESULT_DONE    (Result) {.state = STATE_DONE,    .kind = RESULT_KIND_VOID, .has_fd = false}
+#define RESULT_PENDING (Result) {.state = STATE_PENDING, .kind = RESULT_KIND_VOID, .has_fd = false}
 
 Result result_int(int x) {
     Result r = RESULT_DONE;
@@ -267,19 +265,30 @@ Result result_int_tuple(int x, int y) {
     return r;
 }
 
+Result result_string(String_Builder *sb) {
+    Result r = RESULT_DONE;
+    r.kind = RESULT_KIND_STRING;
+    r.string = sb;
+    return r;
+}
+
 typedef struct {
+    bool in_string_builder;
     bool in_global_curl;
     bool in_multi_curl;
     bool in_easy_curl;
+    String_Builder *string_builder;
     CURLM *multi_handle;
     CURL *easy_handle;
 } Context;
 
 Context context_new() {
     Context c = {
+        .in_string_builder = false,
         .in_global_curl = false,
         .in_multi_curl = false,
         .in_easy_curl = false,
+        .string_builder = NULL,
         .multi_handle = NULL,
         .easy_handle = NULL,
     };
@@ -302,6 +311,7 @@ typedef enum {
     TASK_KIND_CURL_MULTI_CONTEXT,
     TASK_KIND_CURL_EASY_CONTEXT,
     TASK_KIND_CURL_PERFORM,
+    TASK_KIND_COUNTER_STRING,
 } Task_Kind;
 
 typedef struct Task Task;
@@ -361,15 +371,14 @@ struct Task {
         };
         // TASK_KIND_FIFO_CONTEXT
         struct {
-            Task *body;
+            Task *fifo_body;
             Then_Function build_body;
             int fifo_fd;
         };
         // TASK_KIND_STRING_BUILDER_CONTEXT
         struct {
-            Task *sb_head;
+            bool sb_is_init;
             Task *sb_body;
-            Then_Function sb_build;
             String_Builder sb;
         };
         // TASK_KIND_CURL_GLOBAL_CONTEXT
@@ -387,10 +396,14 @@ struct Task {
             bool curl_easy_is_init;
             Task *curl_easy_body;
         };
+        // TASK_KIND_COUNTER_STRING
+        struct {
+            int counter_string_x;
+        };
     };
 };
 
-#define TASK_POOL_CAPACITY 16
+#define TASK_POOL_CAPACITY 24
 Task task_pool[TASK_POOL_CAPACITY];
 typedef struct Task_Free_Node Task_Free_Node;
 struct Task_Free_Node {
@@ -505,8 +518,9 @@ void task_destroy(Task *t) {
         case TASK_KIND_SEQUENCE:
             break;
         case TASK_KIND_PARALLEL:
-        case TASK_KIND_THEN:
             UNIMPLEMENTED("task_destroy");
+        case TASK_KIND_THEN:
+            break;
         case TASK_KIND_ITERATE:
             break;
         case TASK_KIND_LESS_THAN:
@@ -528,6 +542,8 @@ void task_destroy(Task *t) {
         case TASK_KIND_CURL_EASY_CONTEXT:
             break;
         case TASK_KIND_CURL_PERFORM:
+            break;
+        case TASK_KIND_COUNTER_STRING:
             break;
     }
     if (task_in_pool(t)) task_free(t);
@@ -578,6 +594,7 @@ Result task_poll(Task *t, Context *ctx) {
                 Result r = task_poll(t->fst, ctx);
                 switch (r.state) {
                     case STATE_DONE:
+                        task_destroy(t->fst);
                         t->snd = t->then(r);
                         break;
                     case STATE_PENDING:
@@ -585,7 +602,15 @@ Result task_poll(Task *t, Context *ctx) {
                 }
                 return RESULT_PENDING;
             }
-            return task_poll(t->snd, ctx);
+            Result r = task_poll(t->snd, ctx);
+            switch (r.state) {
+                case STATE_DONE:
+                    task_destroy(t->snd);
+                    break;
+                case STATE_PENDING:
+                    break;
+            }
+            return r;
         case TASK_KIND_ITERATE:
             switch (t->iter_phase) {
                 case 0:
@@ -647,14 +672,14 @@ Result task_poll(Task *t, Context *ctx) {
                 Result ret = RESULT_DONE;
                 ret.has_fd = true;
                 ret.fd = t->fifo_fd;
-                t->body = t->build_body(ret);
+                t->fifo_body = t->build_body(ret);
                 return RESULT_PENDING;
             }
-            assert(t->body != NULL);
-            Result ret = task_poll(t->body, ctx);
+            assert(t->fifo_body != NULL);
+            Result ret = task_poll(t->fifo_body, ctx);
             switch (ret.state) {
                 case STATE_DONE:
-                    task_destroy(t->body);
+                    task_destroy(t->fifo_body);
                     close_and_unlink_fifo(t->fifo_fd);
                     printf("[INFO] closed fifo successfully\n");
                     break;
@@ -689,24 +714,13 @@ Result task_poll(Task *t, Context *ctx) {
             }
         case TASK_KIND_STRING_BUILDER_CONTEXT:
             {
-                if (t->sb_body == NULL) {
-                    assert(t->sb_head != NULL);
-                    Result r = task_poll(t->sb_head, ctx);
-                    switch (r.state) {
-                        case STATE_DONE:
-                            task_destroy(t->sb_head);
-                            t->sb = string_builder_new();
-
-                            r.has_string_builder = true;
-                            r.string_builder = &t->sb;
-
-                            t->sb_body = t->sb_build(r);
-                            assert(t->sb_body != NULL);
-                            return RESULT_PENDING;
-                        case STATE_PENDING:
-                            return r;
-                    }
+                if (!t->sb_is_init) {
+                    t->sb = string_builder_new();
+                    t->sb_is_init = true;
+                    ctx->string_builder = &t->sb;
+                    ctx->in_string_builder = true;
                 }
+                assert(t->sb_body != NULL);
                 Result r = task_poll(t->sb_body, ctx);
                 switch (r.state) {
                     case STATE_DONE:
@@ -807,6 +821,11 @@ Result task_poll(Task *t, Context *ctx) {
                 UNIMPLEMENTED("task_poll");
             }
             return RESULT_DONE;
+        case TASK_KIND_COUNTER_STRING:
+            assert(ctx->in_string_builder);
+            string_builder_clear(ctx->string_builder);
+            string_builder_printf(ctx->string_builder, "Counter: %d, String_Builder: %p", t->counter_string_x, ctx->string_builder);
+            return result_string(ctx->string_builder);
     }
     UNREACHABLE("task_poll");
 }
@@ -818,10 +837,12 @@ Task *task_const(Result r) {
     return ret;
 }
 
-Task *task_log(String_Builder *msg) {
+Task *task_log(Result r) {
+    assert(r.state == STATE_DONE);
+    assert(r.kind == RESULT_KIND_STRING);
     Task *ret = task_alloc();
     ret->kind = TASK_KIND_LOG;
-    ret->log_msg = msg;
+    ret->log_msg = r.string;
     return ret;
 }
 
@@ -899,31 +920,44 @@ Task *less_than(Result r) {
     return task_const(r);
 }
 
+Task *task_string_builder_context(Task *body) {
+    Task *t = task_alloc();
+    t->kind = TASK_KIND_STRING_BUILDER_CONTEXT;
+    t->sb_body = body;
+    t->sb_is_init = false;
+    return t;
+}
+
+Task *task_then(Task *fst, Then_Function f) {
+    Task *t = task_alloc();
+    t->kind = TASK_KIND_THEN;
+    t->fst = fst;
+    t->snd = NULL;
+    t->then = f;
+    return t;
+}
+
+Task *counter_string(int x) {
+    Task *t = task_alloc();
+    t->kind = TASK_KIND_COUNTER_STRING;
+    t->counter_string_x = x;
+    return task_then(t, task_log);
+}
+
 Task *counter_inc(Result r) {
     assert(r.state == STATE_DONE);
     assert(r.kind == RESULT_KIND_INT_TUPLE);
-    assert(r.has_string_builder);
 
     Task *ret = task_sequence();
 
-    string_builder_clear(r.string_builder);
-    string_builder_printf(r.string_builder, "Counter: %d", r.x);
-    task_seq_append(ret, task_log(r.string_builder));
-
+    Task *wrap = task_string_builder_context(counter_string(r.x));
+    task_seq_append(ret, wrap);
     task_seq_append(ret, task_wait(1.0));
 
     r.x++;
     task_seq_append(ret, task_const(r));
 
     return ret;
-}
-
-Task *counter(Result r) {
-    assert(r.state == STATE_DONE);
-    assert(r.has_string_builder);
-    assert(r.kind == RESULT_KIND_INT_TUPLE);
-
-    return task_iterate(task_const(r), counter_inc, less_than);
 }
 
 int main() {
@@ -933,24 +967,13 @@ int main() {
     Task fifo = {
         .kind = TASK_KIND_FIFO_CONTEXT,
         .fifo_fd = -1,
-        .body = NULL,
+        .fifo_body = NULL,
         .build_body = repl,
     };
     UNUSED(fifo);
 
-    Task foo = {
-        .kind = TASK_KIND_STRING_BUILDER_CONTEXT,
-        .sb_head = task_const(result_int_tuple(0, 5)),
-        .sb_body = NULL,
-        .sb_build = counter,
-    };
-
-    Task bar = {
-        .kind = TASK_KIND_STRING_BUILDER_CONTEXT,
-        .sb_head = task_const(result_int_tuple(20, 30)),
-        .sb_body = NULL,
-        .sb_build = counter,
-    };
+    Task *foo = task_iterate(task_const(result_int_tuple( 0,  5)), counter_inc, less_than);
+    Task *bar = task_iterate(task_const(result_int_tuple(20, 30)), counter_inc, less_than);
     
     String_Builder msg = string_builder_new();
     string_builder_append_str(&msg, "inside curl easy");
@@ -965,7 +988,7 @@ int main() {
         .curl_easy_body = task_sequence(),
     };
 
-    task_seq_append(curl_easy.curl_easy_body, task_log(&msg));
+    task_seq_append(curl_easy.curl_easy_body, task_log(result_string(&msg)));
     task_seq_append(curl_easy.curl_easy_body, &request);
 
     Task curl_global = {
@@ -978,7 +1001,10 @@ int main() {
     UNUSED(foo);
     UNUSED(bar);
     UNUSED(fifo);
-    task_par_append(baz, &curl_global);
+    UNUSED(curl_global);
+    task_par_append(baz, foo);
+    task_par_append(baz, bar);
+    //task_par_append(baz, &curl_global);
 
     Context ctx = context_new();
 
