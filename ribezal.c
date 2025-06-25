@@ -92,7 +92,7 @@ void string_builder_append(String_Builder *sb, char c) {
     return;
 }
 
-void string_builder_append_str(String_Builder *sb, char *str) {
+void string_builder_append_str(String_Builder *sb, const char *str) {
     while (*str != '\0') {
         string_builder_append(sb, *str);
         str++;
@@ -335,6 +335,7 @@ typedef enum {
     TASK_KIND_FIFO_CONTEXT,
     TASK_KIND_FIFO_REPL,
     TASK_KIND_STRING_BUILDER_CONTEXT,
+    TASK_KIND_STRING_BUILDER_THIS,
     TASK_KIND_CURL_GLOBAL_CONTEXT,
     TASK_KIND_CURL_MULTI_CONTEXT,
     TASK_KIND_CURL_EASY_CONTEXT,
@@ -425,6 +426,10 @@ struct Task {
             bool curl_easy_is_init;
             Task *curl_easy_body;
         };
+        // TASK_KIND_CURL_PERFORM
+        struct {
+            char *url;
+        };
         // TASK_KIND_COUNTER_STRING
         struct {
             int counter_string_x;
@@ -495,6 +500,15 @@ void task_par_append(Task *p, Task *t) {
     p->par_count++;
 }
 
+Task *task_then(Task *fst, Then_Function f) {
+    Task *t = task_alloc();
+    t->kind = TASK_KIND_THEN;
+    t->fst = fst;
+    t->snd = NULL;
+    t->then = f;
+    return t;
+}
+
 Task *task_curl_easy_context(Task *body) {
     Task *t = task_alloc();
     t->kind = TASK_KIND_CURL_EASY_CONTEXT;
@@ -508,6 +522,33 @@ Task *task_curl_global_context(Task *body) {
     t->kind = TASK_KIND_CURL_GLOBAL_CONTEXT;
     t->curl_global_is_init = false;
     t->curl_global_body = body;
+    return t;
+}
+
+Task *task_curl_perform(Result r) {
+    assert(r.state == STATE_DONE);
+    assert(r.kind == RESULT_KIND_STRING);
+
+    Task *t = task_alloc();
+    t->kind = TASK_KIND_CURL_PERFORM;
+    t->url = r.string->str;
+    return t;
+}
+
+Task *task_string_builder_context(Task *body, const char *str) {
+    Task *t = task_alloc();
+    t->kind = TASK_KIND_STRING_BUILDER_CONTEXT;
+    t->sb_body = body;
+    t->sb_is_init = false;
+    t->sb = string_builder_new();
+    string_builder_append_str(&t->sb, str);
+    string_builder_append(&t->sb, '\0');
+    return t;
+}
+
+Task *task_string_builder_this() {
+    Task *t = task_alloc();
+    t->kind = TASK_KIND_STRING_BUILDER_THIS;
     return t;
 }
 
@@ -536,13 +577,18 @@ Reply_Kind execute(char *prog) {
             while (stack_count > 0) stack_drop();
         } else if (strcmp(token, "request") == 0) {
             if (stack_string()) {
-                Task *helper = task_alloc();
-                helper->kind = TASK_KIND_CURL_PERFORM;
+                char *url = stack[stack_count-1].str;
                 task_par_append(runner, 
                         task_curl_global_context(
-                            task_curl_easy_context(helper)
+                            task_string_builder_context(
+                                task_curl_easy_context(
+                                    task_then(task_string_builder_this(), task_curl_perform)
+                                    ), 
+                                url
+                                )
                             )
                         );
+                stack_drop();
                 return REPLY_ACK;
             }
             return REPLY_ERROR;
@@ -613,6 +659,8 @@ void task_destroy(Task *t) {
             break;
         case TASK_KIND_STRING_BUILDER_CONTEXT:
             break;
+        case TASK_KIND_STRING_BUILDER_THIS:
+            break;
         case TASK_KIND_CURL_GLOBAL_CONTEXT:
             break;
         case TASK_KIND_CURL_MULTI_CONTEXT:
@@ -658,6 +706,7 @@ Result task_poll(Task *t, Context *ctx) {
                     case STATE_DONE:
                         task_destroy(t->par[t->par_index]);
                         t->par[t->par_index] = t->par[t->par_count - 1];
+                        t->sub_ctx[t->par_index] = t->sub_ctx[t->par_count - 1];
                         t->par_count--;
                         if (t->par_count > 0) t->par_index %= t->par_count;
                         break;
@@ -798,14 +847,12 @@ Result task_poll(Task *t, Context *ctx) {
             {
                 if (!t->sb_is_init) {
                     assert(!ctx->in_string_builder);
-                    t->sb = string_builder_new();
                     t->sb_is_init = true;
                     Context new_ctx = {
                         .in_string_builder = true,
                         .string_builder = &t->sb,
                     };
                     context_add(ctx, new_ctx);
-                    printf("[INFO] initialized string builder %p\n", ctx->string_builder);
                 }
                 assert(ctx->string_builder != NULL);
                 assert(t->sb_body != NULL);
@@ -815,7 +862,6 @@ Result task_poll(Task *t, Context *ctx) {
                         task_destroy(t->sb_body);
                         t->sb_body = NULL;
                         string_builder_destroy(t->sb);
-                        printf("[INFO] deconstructed string builder %p\n", ctx->string_builder);
                         ctx->in_string_builder = false;
                         ctx->string_builder = NULL;
                         break;
@@ -823,6 +869,9 @@ Result task_poll(Task *t, Context *ctx) {
                 }
                 return r;
             }
+        case TASK_KIND_STRING_BUILDER_THIS:
+            assert(ctx->in_string_builder);
+            return result_string(ctx->string_builder);
         case TASK_KIND_CURL_GLOBAL_CONTEXT:
             {
                 if (!t->curl_global_is_init) {
@@ -882,11 +931,6 @@ Result task_poll(Task *t, Context *ctx) {
                     if (ctx->easy_handle == NULL) {
                         UNIMPLEMENTED("task_poll");
                     }
-                    CURLcode code = curl_easy_setopt(ctx->easy_handle, CURLOPT_URL, "https://example.com");
-                    if (code != CURLE_OK) {
-                        UNIMPLEMENTED("task_poll");
-                    }
-                    
                     t->curl_easy_is_init = true;
                     ctx->in_easy_curl = true;
                 }
@@ -905,12 +949,15 @@ Result task_poll(Task *t, Context *ctx) {
             }
         case TASK_KIND_CURL_PERFORM:
             assert(ctx->in_easy_curl);
-            printf("[INFO] performing request\n");
             CURLcode code;
-            code = curl_easy_perform(ctx->easy_handle);
-            printf("[INFO] performed request\n");
+            code = curl_easy_setopt(ctx->easy_handle, CURLOPT_URL, t->url);
             if (code != CURLE_OK) {
                 UNIMPLEMENTED("task_poll");
+            }
+            code = curl_easy_perform(ctx->easy_handle);
+            if (code != CURLE_OK) {
+                printf("[ERROR] failed curl_easy_perform: %s\n", curl_easy_strerror(code));
+                exit(1);
             }
             return RESULT_DONE;
         case TASK_KIND_COUNTER_STRING:
@@ -995,23 +1042,6 @@ Task *less_than(Result r) {
     return task_const(r);
 }
 
-Task *task_string_builder_context(Task *body) {
-    Task *t = task_alloc();
-    t->kind = TASK_KIND_STRING_BUILDER_CONTEXT;
-    t->sb_body = body;
-    t->sb_is_init = false;
-    return t;
-}
-
-Task *task_then(Task *fst, Then_Function f) {
-    Task *t = task_alloc();
-    t->kind = TASK_KIND_THEN;
-    t->fst = fst;
-    t->snd = NULL;
-    t->then = f;
-    return t;
-}
-
 Task *counter_string(int x) {
     Task *t = task_alloc();
     t->kind = TASK_KIND_COUNTER_STRING;
@@ -1025,7 +1055,7 @@ Task *counter_inc(Result r) {
 
     Task *ret = task_sequence();
 
-    Task *wrap = task_string_builder_context(counter_string(r.x));
+    Task *wrap = task_string_builder_context(counter_string(r.x), "");
     task_seq_append(ret, wrap);
     task_seq_append(ret, task_wait(1.0));
 
