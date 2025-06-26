@@ -281,9 +281,9 @@ Result result_string(String_Builder *sb) {
 
 typedef enum {
     CONTEXT_KIND_STRING_BUILDER,
-    CONTEXT_KIND_GLOBAL_CURL,
-    CONTEXT_KIND_MULTI_CURL,
-    CONTEXT_KIND_EASY_CURL,
+    CONTEXT_KIND_CURL_GLOBAL,
+    CONTEXT_KIND_CURL_MULTI,
+    CONTEXT_KIND_CURL_EASY,
     CONTEXT_KIND_COUNT,
 } Context_Kind;
 
@@ -319,13 +319,13 @@ Context context_global_curl() {
         UNIMPLEMENTED("task_poll");
     }
     Context c = context_new();
-    c.flag[CONTEXT_KIND_GLOBAL_CURL] = true;
+    c.flag[CONTEXT_KIND_CURL_GLOBAL] = true;
     return c;
 }
 
 Context context_easy_curl() {
     Context c = context_new();
-    c.flag[CONTEXT_KIND_EASY_CURL] = true;
+    c.flag[CONTEXT_KIND_CURL_EASY] = true;
     c.easy_handle = curl_easy_init();
     assert(c.easy_handle != NULL);
     return c;
@@ -340,21 +340,21 @@ void context_add(Context *this, Context other) {
             this->string_builder = other.string_builder;
         }
     }
-    if (other.flag[CONTEXT_KIND_GLOBAL_CURL]) {
-        if (this->flag[CONTEXT_KIND_GLOBAL_CURL]) {
+    if (other.flag[CONTEXT_KIND_CURL_GLOBAL]) {
+        if (this->flag[CONTEXT_KIND_CURL_GLOBAL]) {
             UNIMPLEMENTED("context_add");
         } else {
-            this->flag[CONTEXT_KIND_GLOBAL_CURL] = true;
+            this->flag[CONTEXT_KIND_CURL_GLOBAL] = true;
         }
     }
-    if (other.flag[CONTEXT_KIND_MULTI_CURL]) {
+    if (other.flag[CONTEXT_KIND_CURL_MULTI]) {
         UNIMPLEMENTED("context_add");
     }
-    if (other.flag[CONTEXT_KIND_EASY_CURL]) {
-        if (this->flag[CONTEXT_KIND_EASY_CURL]) {
+    if (other.flag[CONTEXT_KIND_CURL_EASY]) {
+        if (this->flag[CONTEXT_KIND_CURL_EASY]) {
             UNIMPLEMENTED("context_add");
         } else {
-            this->flag[CONTEXT_KIND_EASY_CURL] = true;
+            this->flag[CONTEXT_KIND_CURL_EASY] = true;
             this->easy_handle = other.easy_handle;
         }
     }
@@ -371,11 +371,8 @@ typedef enum {
     TASK_KIND_LOG,
     TASK_KIND_FIFO_CONTEXT,
     TASK_KIND_FIFO_REPL,
-    TASK_KIND_STRING_BUILDER_CONTEXT,
+    TASK_KIND_CONTEXT,
     TASK_KIND_STRING_BUILDER_THIS,
-    TASK_KIND_CURL_GLOBAL_CONTEXT,
-    TASK_KIND_CURL_MULTI_CONTEXT,
-    TASK_KIND_CURL_EASY_CONTEXT,
     TASK_KIND_CURL_PERFORM,
     TASK_KIND_COUNTER_STRING,
 } Task_Kind;
@@ -442,26 +439,14 @@ struct Task {
             Then_Function build_body;
             int fifo_fd;
         };
-        // TASK_KIND_STRING_BUILDER_CONTEXT
+        // TASK_KIND_CONTEXT
         struct {
-            bool sb_is_init;
-            Task *sb_body;
-            String_Builder sb;
-        };
-        // TASK_KIND_CURL_GLOBAL_CONTEXT
-        struct {
-            bool curl_global_is_init;
-            Task *curl_global_body;
-        };
-        // TASK_KIND_CURL_MULTI_CONTEXT
-        struct {
-            bool curl_multi_is_init;
-            Task *curl_multi_body;
-        };
-        // TASK_KIND_CURL_EASY_CONTEXT
-        struct {
-            bool curl_easy_is_init;
-            Task *curl_easy_body;
+            Context_Kind context_kind;
+            // TODO: do we even need this flag? We have a flag in the Context struct which tells us wether we are in the context
+            bool context_is_init;
+            Task *context_body;
+            // Only used if context_kind == CONTEXT_KIND_STRING_BUILDER
+            String_Builder context_sb;
         };
         // TASK_KIND_CURL_PERFORM
         struct {
@@ -548,17 +533,19 @@ Task *task_then(Task *fst, Then_Function f) {
 
 Task *task_curl_easy_context(Task *body) {
     Task *t = task_alloc();
-    t->kind = TASK_KIND_CURL_EASY_CONTEXT;
-    t->curl_easy_is_init = false;
-    t->curl_easy_body = body;
+    t->kind = TASK_KIND_CONTEXT;
+    t->context_kind = CONTEXT_KIND_CURL_EASY;
+    t->context_is_init = false;
+    t->context_body = body;
     return t;
 }
 
 Task *task_curl_global_context(Task *body) {
     Task *t = task_alloc();
-    t->kind = TASK_KIND_CURL_GLOBAL_CONTEXT;
-    t->curl_global_is_init = false;
-    t->curl_global_body = body;
+    t->kind = TASK_KIND_CONTEXT;
+    t->context_kind = CONTEXT_KIND_CURL_GLOBAL;
+    t->context_is_init = false;
+    t->context_body = body;
     return t;
 }
 
@@ -574,12 +561,13 @@ Task *task_curl_perform(Result r) {
 
 Task *task_string_builder_context(Task *body, const char *str) {
     Task *t = task_alloc();
-    t->kind = TASK_KIND_STRING_BUILDER_CONTEXT;
-    t->sb_body = body;
-    t->sb_is_init = false;
-    t->sb = string_builder_new();
-    string_builder_append_str(&t->sb, str);
-    string_builder_append(&t->sb, '\0');
+    t->kind = TASK_KIND_CONTEXT;
+    t->context_kind = CONTEXT_KIND_STRING_BUILDER;
+    t->context_body = body;
+    t->context_is_init = false;
+    t->context_sb = string_builder_new();
+    string_builder_append_str(&t->context_sb, str);
+    string_builder_append(&t->context_sb, '\0');
     return t;
 }
 
@@ -694,15 +682,9 @@ void task_destroy(Task *t) {
             break;
         case TASK_KIND_FIFO_REPL:
             break;
-        case TASK_KIND_STRING_BUILDER_CONTEXT:
+        case TASK_KIND_CONTEXT:
             break;
         case TASK_KIND_STRING_BUILDER_THIS:
-            break;
-        case TASK_KIND_CURL_GLOBAL_CONTEXT:
-            break;
-        case TASK_KIND_CURL_MULTI_CONTEXT:
-            break;
-        case TASK_KIND_CURL_EASY_CONTEXT:
             break;
         case TASK_KIND_CURL_PERFORM:
             break;
@@ -880,100 +862,106 @@ Result task_poll(Task *t, Context *ctx) {
                     exit(1);
                 }
             }
-        case TASK_KIND_STRING_BUILDER_CONTEXT:
-            {
-                if (!t->sb_is_init) {
-                    assert(!ctx->flag[CONTEXT_KIND_STRING_BUILDER]);
-                    t->sb_is_init = true;
-                    context_add(ctx, context_string_builder(&t->sb));
-                }
-                assert(ctx->string_builder != NULL);
-                assert(t->sb_body != NULL);
-                Result r = task_poll(t->sb_body, ctx);
-                switch (r.state) {
-                    case STATE_DONE:
-                        task_destroy(t->sb_body);
-                        t->sb_body = NULL;
-                        string_builder_destroy(t->sb);
-                        ctx->flag[CONTEXT_KIND_STRING_BUILDER] = false;
-                        ctx->string_builder = NULL;
-                        break;
-                    case STATE_PENDING:
-                }
-                return r;
+        case TASK_KIND_CONTEXT:
+            switch (t->context_kind) {
+                case CONTEXT_KIND_STRING_BUILDER:
+                    {
+                        if (!t->context_is_init) {
+                            assert(!ctx->flag[CONTEXT_KIND_STRING_BUILDER]);
+                            t->context_is_init = true;
+                            context_add(ctx, context_string_builder(&t->context_sb));
+                        }
+                        assert(ctx->string_builder != NULL);
+                        assert(t->context_body != NULL);
+                        Result r = task_poll(t->context_body, ctx);
+                        switch (r.state) {
+                            case STATE_DONE:
+                                task_destroy(t->context_body);
+                                t->context_body = NULL;
+                                string_builder_destroy(t->context_sb);
+                                ctx->flag[CONTEXT_KIND_STRING_BUILDER] = false;
+                                ctx->string_builder = NULL;
+                                break;
+                            case STATE_PENDING:
+                        }
+                        return r;
+                    }
+                case CONTEXT_KIND_CURL_GLOBAL:
+                    {
+                        if (!t->context_is_init) {
+                            t->context_is_init = true;
+                            context_add(ctx, context_global_curl());
+                        }
+                        Result r = task_poll(t->context_body, ctx);
+                        switch (r.state) {
+                            case STATE_DONE:
+                                task_destroy(t->context_body);
+                                curl_global_cleanup();
+                                ctx->flag[CONTEXT_KIND_CURL_GLOBAL] = false;
+                                break;
+                            case STATE_PENDING:
+                                break;
+                        }
+                        return r;
+                    }
+                case CONTEXT_KIND_CURL_MULTI:
+                    {
+                        assert(ctx->flag[CONTEXT_KIND_CURL_GLOBAL]);
+                        if (!t->context_is_init) {
+                            ctx->multi_handle = curl_multi_init();
+                            if (ctx->multi_handle == NULL) {
+                                UNIMPLEMENTED("task_poll");
+                            }
+                            t->context_is_init = true;
+                            ctx->flag[CONTEXT_KIND_CURL_MULTI] = true;
+                        }
+                        assert(ctx->multi_handle != NULL);
+                        Result r = task_poll(t->context_body, ctx);
+                        switch (r.state) {
+                            case STATE_DONE:
+                                task_destroy(t->context_body);
+                                CURLMcode code = curl_multi_cleanup(ctx->multi_handle);
+                                if (code != CURLM_OK) {
+                                    UNIMPLEMENTED("task_poll");
+                                }
+                                ctx->flag[CONTEXT_KIND_CURL_MULTI] = false;
+                                break;
+                            case STATE_PENDING:
+                                UNIMPLEMENTED("task_poll");
+                        }
+                        return r;
+                    }
+                case CONTEXT_KIND_CURL_EASY:
+                    assert(ctx->flag[CONTEXT_KIND_CURL_GLOBAL]);
+                    if (ctx->flag[CONTEXT_KIND_CURL_MULTI]) {
+                        UNIMPLEMENTED("task_poll");
+                    } else {
+                        if (!t->context_is_init) {
+                            t->context_is_init = true;
+                            context_add(ctx, context_easy_curl());
+                        }
+                        assert(t->context_body != NULL);
+                        Result r = task_poll(t->context_body, ctx);
+                        switch (r.state) {
+                            case STATE_DONE:
+                                task_destroy(t->context_body);
+                                curl_easy_cleanup(ctx->easy_handle);
+                                ctx->flag[CONTEXT_KIND_CURL_EASY] = false;
+                                break;
+                            case STATE_PENDING:
+                                break;
+                        }
+                        return r;
+                    }
+                case CONTEXT_KIND_COUNT:
+                    UNREACHABLE("CONTEXT_KIND_COUNT is not a valid Context_Kind");
             }
+            UNREACHABLE("no valid Context_Kind");
         case TASK_KIND_STRING_BUILDER_THIS:
             assert(ctx->flag[CONTEXT_KIND_STRING_BUILDER]);
             return result_string(ctx->string_builder);
-        case TASK_KIND_CURL_GLOBAL_CONTEXT:
-            {
-                if (!t->curl_global_is_init) {
-                    t->curl_global_is_init = true;
-                    context_add(ctx, context_global_curl());
-                }
-                Result r = task_poll(t->curl_global_body, ctx);
-                switch (r.state) {
-                    case STATE_DONE:
-                        task_destroy(t->curl_global_body);
-                        curl_global_cleanup();
-                        ctx->flag[CONTEXT_KIND_GLOBAL_CURL] = false;
-                        break;
-                    case STATE_PENDING:
-                        break;
-                }
-                return r;
-            }
-        case TASK_KIND_CURL_MULTI_CONTEXT:
-            {
-                assert(ctx->flag[CONTEXT_KIND_GLOBAL_CURL]);
-                if (!t->curl_multi_is_init) {
-                    ctx->multi_handle = curl_multi_init();
-                    if (ctx->multi_handle == NULL) {
-                        UNIMPLEMENTED("task_poll");
-                    }
-                    t->curl_multi_is_init = true;
-                    ctx->flag[CONTEXT_KIND_MULTI_CURL] = true;
-                }
-                assert(ctx->multi_handle != NULL);
-                Result r = task_poll(t->curl_multi_body, ctx);
-                switch (r.state) {
-                    case STATE_DONE:
-                        task_destroy(t->curl_multi_body);
-                        CURLMcode code = curl_multi_cleanup(ctx->multi_handle);
-                        if (code != CURLM_OK) {
-                            UNIMPLEMENTED("task_poll");
-                        }
-                        ctx->flag[CONTEXT_KIND_MULTI_CURL] = false;
-                        break;
-                    case STATE_PENDING:
-                        UNIMPLEMENTED("task_poll");
-                }
-                return r;
-            }
-        case TASK_KIND_CURL_EASY_CONTEXT:
-            assert(ctx->flag[CONTEXT_KIND_GLOBAL_CURL]);
-            if (ctx->flag[CONTEXT_KIND_MULTI_CURL]) {
-                UNIMPLEMENTED("task_poll");
-            } else {
-                if (!t->curl_easy_is_init) {
-                    t->curl_easy_is_init = true;
-                    context_add(ctx, context_easy_curl());
-                }
-                assert(t->curl_easy_body != NULL);
-                Result r = task_poll(t->curl_easy_body, ctx);
-                switch (r.state) {
-                    case STATE_DONE:
-                        task_destroy(t->curl_easy_body);
-                        curl_easy_cleanup(ctx->easy_handle);
-                        ctx->flag[CONTEXT_KIND_EASY_CURL] = false;
-                        break;
-                    case STATE_PENDING:
-                        break;
-                }
-                return r;
-            }
         case TASK_KIND_CURL_PERFORM:
-            assert(ctx->flag[CONTEXT_KIND_EASY_CURL]);
+            assert(ctx->flag[CONTEXT_KIND_CURL_EASY]);
             CURLcode code;
             assert(t->url != NULL);
             code = curl_easy_setopt(ctx->easy_handle, CURLOPT_URL, t->url);
