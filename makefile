@@ -1,7 +1,7 @@
-all: ribezal
+all: build/ribezal
 
-run: ribezal
-	./ribezal &
+run: build/ribezal
+	./build/ribezal &
 
-ribezal: ribezal.c devutils.h
-	gcc -Wall -Wextra -Werror -o ribezal ribezal.c -lcurl
+build/ribezal: ribezal.c devutils.h
+	gcc -Wall -Wextra -Werror -o build/ribezal ribezal.c -lcurl
