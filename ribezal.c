@@ -1081,6 +1081,8 @@ Task *counter_inc(Result r) {
     return ret;
 }
 
+#ifndef TEST
+
 int main() {
     // We need to do this to initialize the pool allocator
     task_free_all();
@@ -1139,3 +1141,5 @@ int main() {
     printf("[INFO] Stack: ");
     stack_print();
 }
+
+#endif // TEST
