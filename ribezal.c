@@ -257,6 +257,13 @@ typedef struct {
 #define RESULT_DONE    (Result) {.state = STATE_DONE,    .kind = RESULT_KIND_VOID, .has_fd = false}
 #define RESULT_PENDING (Result) {.state = STATE_PENDING, .kind = RESULT_KIND_VOID, .has_fd = false}
 
+Result result_bool(bool b) {
+    Result r = RESULT_DONE;
+    r.kind = RESULT_KIND_BOOL;
+    r.bool_val = b;
+    return r;
+}
+
 Result result_int(int x) {
     Result r = RESULT_DONE;
     r.kind = RESULT_KIND_INT;
