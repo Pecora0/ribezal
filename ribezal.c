@@ -250,12 +250,12 @@ typedef struct {
     String_Builder *string;
 
     // possible contexts
-    bool has_fd;
-    int fd;
+    // bool has_fd;
+    // int fd;
 } Result;
 
-#define RESULT_DONE    (Result) {.state = STATE_DONE,    .kind = RESULT_KIND_VOID, .has_fd = false}
-#define RESULT_PENDING (Result) {.state = STATE_PENDING, .kind = RESULT_KIND_VOID, .has_fd = false}
+#define RESULT_DONE    (Result) {.state = STATE_DONE,    .kind = RESULT_KIND_VOID}
+#define RESULT_PENDING (Result) {.state = STATE_PENDING, .kind = RESULT_KIND_VOID}
 
 Result result_bool(bool b) {
     Result r = RESULT_DONE;
@@ -288,6 +288,7 @@ Result result_string(String_Builder *sb) {
 
 typedef enum {
     CONTEXT_KIND_STRING_BUILDER,
+    CONTEXT_KIND_FIFO,
     CONTEXT_KIND_CURL_GLOBAL,
     CONTEXT_KIND_CURL_MULTI,
     CONTEXT_KIND_CURL_EASY,
@@ -299,6 +300,7 @@ typedef struct {
     String_Builder *string_builder;
     CURLM *multi_handle;
     CURL *easy_handle;
+    int file_descriptor;
 } Context;
 
 Context context_new() {
@@ -306,6 +308,7 @@ Context context_new() {
         .string_builder = NULL,
         .multi_handle = NULL,
         .easy_handle = NULL,
+        .file_descriptor = -1,
     };
     for (size_t i=0; i<CONTEXT_KIND_COUNT; i++) {
         c.flag[i] = false;
@@ -317,6 +320,13 @@ Context context_string_builder(String_Builder *sb) {
     Context c = context_new();
     c.flag[CONTEXT_KIND_STRING_BUILDER] = true;
     c.string_builder = sb;
+    return c;
+}
+
+Context context_fifo() {
+    Context c = context_new();
+    c.flag[CONTEXT_KIND_FIFO] = true;
+    c.file_descriptor = make_and_open_fifo();
     return c;
 }
 
@@ -365,6 +375,14 @@ void context_add(Context *this, Context other) {
             this->easy_handle = other.easy_handle;
         }
     }
+    if (other.flag[CONTEXT_KIND_FIFO]) {
+        if (this->flag[CONTEXT_KIND_FIFO]) {
+            UNIMPLEMENTED("context_add");
+        } else {
+            this->flag[CONTEXT_KIND_FIFO] = true;
+            this->file_descriptor = other.file_descriptor;
+        }
+    }
 }
 
 typedef enum {
@@ -375,7 +393,6 @@ typedef enum {
     TASK_KIND_ITERATE,
     TASK_KIND_WAIT,
     TASK_KIND_LOG,
-    TASK_KIND_FIFO_CONTEXT,
     TASK_KIND_FIFO_REPL,
     TASK_KIND_CONTEXT,
     TASK_KIND_STRING_BUILDER_THIS,
@@ -434,16 +451,6 @@ struct Task {
             double duration;
             bool started;
             time_t start;
-        };
-        // TASK_KIND_FIFO_REPL
-        struct {
-            int file_desc;
-        };
-        // TASK_KIND_FIFO_CONTEXT
-        struct {
-            Task *fifo_body;
-            Then_Function build_body;
-            int fifo_fd;
         };
         // TASK_KIND_CONTEXT
         struct {
@@ -534,6 +541,15 @@ Task *task_then(Task *fst, Then_Function f) {
     t->fst = fst;
     t->snd = NULL;
     t->then = f;
+    return t;
+}
+
+Task *task_file_context(Task *body) {
+    Task *t = task_alloc();
+    t->kind = TASK_KIND_CONTEXT;
+    t->context_kind = CONTEXT_KIND_FIFO;
+    t->context_is_init = false;
+    t->context_body = body;
     return t;
 }
 
@@ -682,8 +698,6 @@ void task_destroy(Task *t) {
             break;
         case TASK_KIND_LOG:
             break;
-        case TASK_KIND_FIFO_CONTEXT:
-            break;
         case TASK_KIND_FIFO_REPL:
             break;
         case TASK_KIND_CONTEXT:
@@ -813,32 +827,10 @@ Result task_poll(Task *t, Context *ctx) {
             string_builder_append(t->log_msg, '\0');
             printf("[LOG] %s\n", t->log_msg->str);
             return RESULT_DONE;
-        case TASK_KIND_FIFO_CONTEXT:
-            if (t->fifo_fd < 0) {
-                t->fifo_fd = make_and_open_fifo();
-                printf("[INFO] opened fifo successfully\n");
-
-                Result ret = RESULT_DONE;
-                ret.has_fd = true;
-                ret.fd = t->fifo_fd;
-                t->fifo_body = t->build_body(ret);
-                return RESULT_PENDING;
-            }
-            assert(t->fifo_body != NULL);
-            Result ret = task_poll(t->fifo_body, ctx);
-            switch (ret.state) {
-                case STATE_DONE:
-                    task_destroy(t->fifo_body);
-                    close_and_unlink_fifo(t->fifo_fd);
-                    printf("[INFO] closed fifo successfully\n");
-                    break;
-                case STATE_PENDING:
-                    break;
-            }
-            return ret;
         case TASK_KIND_FIFO_REPL:
             {
-                ssize_t r = read(t->file_desc, read_buf, READ_BUF_CAPACITY-1);
+                assert(ctx->flag[CONTEXT_KIND_FIFO]);
+                ssize_t r = read(ctx->file_descriptor, read_buf, READ_BUF_CAPACITY-1);
                 if (r == 0) {
                     return RESULT_PENDING;
                 } else if (r == -1 && errno == EAGAIN) {
@@ -888,6 +880,26 @@ Result task_poll(Task *t, Context *ctx) {
                         }
                         return r;
                     }
+                case CONTEXT_KIND_FIFO:
+                    if (!t->context_is_init) {
+                        assert(!ctx->flag[CONTEXT_KIND_FIFO]);
+                        t->context_is_init = true;
+                        context_add(ctx, context_fifo());
+                        printf("[INFO] opened fifo successfully\n");
+                        return RESULT_PENDING;
+                    }
+                    Result ret = task_poll(t->context_body, ctx);
+                    switch (ret.state) {
+                        case STATE_DONE:
+                            task_destroy(t->context_body);
+                            close_and_unlink_fifo(ctx->file_descriptor);
+                            ctx->flag[CONTEXT_KIND_FIFO] = false;
+                            printf("[INFO] closed fifo successfully\n");
+                            break;
+                        case STATE_PENDING:
+                            break;
+                    }
+                    return ret;
                 case CONTEXT_KIND_CURL_GLOBAL:
                     {
                         if (!t->context_is_init) {
@@ -1037,13 +1049,9 @@ Task *task_iterate(Task *start, Then_Function next, Then_Function cond) {
     return t;
 }
 
-Task *repl(Result r) {
-    assert(r.state == STATE_DONE);
-    assert(r.has_fd);
-
+Task *repl() {
     Task *repl = task_alloc();
     repl->kind = TASK_KIND_FIFO_REPL;
-    repl->file_desc = r.fd;
 
     return repl;
 }
@@ -1093,13 +1101,8 @@ int main() {
     runner = task_parallel();
 
     // /*
-    Task fifo = {
-        .kind = TASK_KIND_FIFO_CONTEXT,
-        .fifo_fd = -1,
-        .fifo_body = NULL,
-        .build_body = repl,
-    };
-    task_par_append(runner, &fifo);
+    Task *fifo = task_file_context(repl());
+    task_par_append(runner, fifo);
     // */
 
     /*
