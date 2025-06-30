@@ -316,73 +316,96 @@ Context context_new() {
     return c;
 }
 
-Context context_string_builder(String_Builder *sb) {
-    Context c = context_new();
-    c.flag[CONTEXT_KIND_STRING_BUILDER] = true;
-    c.string_builder = sb;
-    return c;
+void context_add_string_builder(Context *c, String_Builder *sb) {
+    c->flag[CONTEXT_KIND_STRING_BUILDER] = true;
+    c->string_builder = sb;
 }
 
-Context context_fifo() {
-    Context c = context_new();
-    c.flag[CONTEXT_KIND_FIFO] = true;
-    c.file_descriptor = make_and_open_fifo();
-    return c;
+void context_remove_string_builder(Context *c) {
+    string_builder_destroy(*c->string_builder);
+    c->string_builder = NULL;
+    c->flag[CONTEXT_KIND_STRING_BUILDER] = false;
 }
 
-Context context_global_curl() {
+void context_add_fifo(Context *c) {
+    c->flag[CONTEXT_KIND_FIFO] = true;
+    c->file_descriptor = make_and_open_fifo();
+}
+
+void context_remove_fifo(Context *c) {
+    close_and_unlink_fifo(c->file_descriptor);
+    c->flag[CONTEXT_KIND_FIFO] = false;
+}
+
+void context_add_curl_global(Context *c) {
     CURLcode r = curl_global_init(CURL_GLOBAL_DEFAULT);
     if (r != 0) {
         UNIMPLEMENTED("task_poll");
     }
-    Context c = context_new();
-    c.flag[CONTEXT_KIND_CURL_GLOBAL] = true;
-    return c;
+    c->flag[CONTEXT_KIND_CURL_GLOBAL] = true;
 }
 
-Context context_easy_curl() {
-    Context c = context_new();
-    c.flag[CONTEXT_KIND_CURL_EASY] = true;
-    c.easy_handle = curl_easy_init();
-    assert(c.easy_handle != NULL);
-    return c;
+void context_remove_curl_global(Context *c) {
+    curl_global_cleanup();
+    c->flag[CONTEXT_KIND_CURL_GLOBAL] = false;
 }
 
-void context_add(Context *this, Context other) {
-    if (other.flag[CONTEXT_KIND_STRING_BUILDER]) {
-        if (this->flag[CONTEXT_KIND_STRING_BUILDER]) {
-            UNIMPLEMENTED("context_add");
-        } else {
-            this->flag[CONTEXT_KIND_STRING_BUILDER] = true;
-            this->string_builder = other.string_builder;
+void context_add_curl_easy(Context *c) {
+    c->flag[CONTEXT_KIND_CURL_EASY] = true;
+    c->easy_handle = curl_easy_init();
+    assert(c->easy_handle != NULL);
+}
+
+void context_remove_curl_easy(Context *c) {
+    curl_easy_cleanup(c->easy_handle);
+    c->flag[CONTEXT_KIND_CURL_EASY] = false;
+}
+
+void context_merge(Context *this, Context other) {
+    for (Context_Kind i=0; i<CONTEXT_KIND_COUNT; i++) {
+        if (other.flag[i]) {
+            if (this->flag[i]) {
+                UNIMPLEMENTED("context_merge: conflict between contexts");
+            } else {
+                UNIMPLEMENTED("context_merge");
+            }
         }
     }
-    if (other.flag[CONTEXT_KIND_CURL_GLOBAL]) {
-        if (this->flag[CONTEXT_KIND_CURL_GLOBAL]) {
-            UNIMPLEMENTED("context_add");
-        } else {
-            this->flag[CONTEXT_KIND_CURL_GLOBAL] = true;
-        }
-    }
-    if (other.flag[CONTEXT_KIND_CURL_MULTI]) {
-        UNIMPLEMENTED("context_add");
-    }
-    if (other.flag[CONTEXT_KIND_CURL_EASY]) {
-        if (this->flag[CONTEXT_KIND_CURL_EASY]) {
-            UNIMPLEMENTED("context_add");
-        } else {
-            this->flag[CONTEXT_KIND_CURL_EASY] = true;
-            this->easy_handle = other.easy_handle;
-        }
-    }
-    if (other.flag[CONTEXT_KIND_FIFO]) {
-        if (this->flag[CONTEXT_KIND_FIFO]) {
-            UNIMPLEMENTED("context_add");
-        } else {
-            this->flag[CONTEXT_KIND_FIFO] = true;
-            this->file_descriptor = other.file_descriptor;
-        }
-    }
+    //UNIMPLEMENTED("context_merge");
+    //if (other.flag[CONTEXT_KIND_STRING_BUILDER]) {
+    //    if (this->flag[CONTEXT_KIND_STRING_BUILDER]) {
+    //        UNIMPLEMENTED("context_add");
+    //    } else {
+    //        this->flag[CONTEXT_KIND_STRING_BUILDER] = true;
+    //        this->string_builder = other.string_builder;
+    //    }
+    //}
+    //if (other.flag[CONTEXT_KIND_CURL_GLOBAL]) {
+    //    if (this->flag[CONTEXT_KIND_CURL_GLOBAL]) {
+    //        UNIMPLEMENTED("context_add");
+    //    } else {
+    //        this->flag[CONTEXT_KIND_CURL_GLOBAL] = true;
+    //    }
+    //}
+    //if (other.flag[CONTEXT_KIND_CURL_MULTI]) {
+    //    UNIMPLEMENTED("context_add");
+    //}
+    //if (other.flag[CONTEXT_KIND_CURL_EASY]) {
+    //    if (this->flag[CONTEXT_KIND_CURL_EASY]) {
+    //        UNIMPLEMENTED("context_add");
+    //    } else {
+    //        this->flag[CONTEXT_KIND_CURL_EASY] = true;
+    //        this->easy_handle = other.easy_handle;
+    //    }
+    //}
+    //if (other.flag[CONTEXT_KIND_FIFO]) {
+    //    if (this->flag[CONTEXT_KIND_FIFO]) {
+    //        UNIMPLEMENTED("context_add");
+    //    } else {
+    //        this->flag[CONTEXT_KIND_FIFO] = true;
+    //        this->file_descriptor = other.file_descriptor;
+    //    }
+    //}
 }
 
 typedef enum {
@@ -737,7 +760,7 @@ Result task_poll(Task *t, Context *ctx) {
         case TASK_KIND_PARALLEL:
             {
                 if (t->par_count == 0) return RESULT_DONE;
-                context_add(t->sub_ctx + t->par_index, *ctx);
+                context_merge(t->sub_ctx + t->par_index, *ctx);
                 Result r = task_poll(t->par[t->par_index], t->sub_ctx + t->par_index);
                 switch (r.state) {
                     case STATE_DONE:
@@ -863,7 +886,7 @@ Result task_poll(Task *t, Context *ctx) {
                         if (!t->context_is_init) {
                             assert(!ctx->flag[CONTEXT_KIND_STRING_BUILDER]);
                             t->context_is_init = true;
-                            context_add(ctx, context_string_builder(&t->context_sb));
+                            context_add_string_builder(ctx, &t->context_sb);
                         }
                         assert(ctx->string_builder != NULL);
                         assert(t->context_body != NULL);
@@ -872,9 +895,7 @@ Result task_poll(Task *t, Context *ctx) {
                             case STATE_DONE:
                                 task_destroy(t->context_body);
                                 t->context_body = NULL;
-                                string_builder_destroy(t->context_sb);
-                                ctx->flag[CONTEXT_KIND_STRING_BUILDER] = false;
-                                ctx->string_builder = NULL;
+                                context_remove_string_builder(ctx);
                                 break;
                             case STATE_PENDING:
                         }
@@ -884,7 +905,7 @@ Result task_poll(Task *t, Context *ctx) {
                     if (!t->context_is_init) {
                         assert(!ctx->flag[CONTEXT_KIND_FIFO]);
                         t->context_is_init = true;
-                        context_add(ctx, context_fifo());
+                        context_add_fifo(ctx);
                         printf("[INFO] opened fifo successfully\n");
                         return RESULT_PENDING;
                     }
@@ -892,8 +913,7 @@ Result task_poll(Task *t, Context *ctx) {
                     switch (ret.state) {
                         case STATE_DONE:
                             task_destroy(t->context_body);
-                            close_and_unlink_fifo(ctx->file_descriptor);
-                            ctx->flag[CONTEXT_KIND_FIFO] = false;
+                            context_remove_fifo(ctx);
                             printf("[INFO] closed fifo successfully\n");
                             break;
                         case STATE_PENDING:
@@ -904,14 +924,13 @@ Result task_poll(Task *t, Context *ctx) {
                     {
                         if (!t->context_is_init) {
                             t->context_is_init = true;
-                            context_add(ctx, context_global_curl());
+                            context_add_curl_global(ctx);
                         }
                         Result r = task_poll(t->context_body, ctx);
                         switch (r.state) {
                             case STATE_DONE:
                                 task_destroy(t->context_body);
-                                curl_global_cleanup();
-                                ctx->flag[CONTEXT_KIND_CURL_GLOBAL] = false;
+                                context_remove_curl_global(ctx);
                                 break;
                             case STATE_PENDING:
                                 break;
@@ -952,15 +971,14 @@ Result task_poll(Task *t, Context *ctx) {
                     } else {
                         if (!t->context_is_init) {
                             t->context_is_init = true;
-                            context_add(ctx, context_easy_curl());
+                            context_add_curl_easy(ctx);
                         }
                         assert(t->context_body != NULL);
                         Result r = task_poll(t->context_body, ctx);
                         switch (r.state) {
                             case STATE_DONE:
                                 task_destroy(t->context_body);
-                                curl_easy_cleanup(ctx->easy_handle);
-                                ctx->flag[CONTEXT_KIND_CURL_EASY] = false;
+                                context_remove_curl_easy(ctx);
                                 break;
                             case STATE_PENDING:
                                 break;
