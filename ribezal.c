@@ -373,7 +373,6 @@ typedef enum {
     TASK_KIND_PARALLEL,
     TASK_KIND_THEN,
     TASK_KIND_ITERATE,
-    TASK_KIND_LESS_THAN,
     TASK_KIND_WAIT,
     TASK_KIND_LOG,
     TASK_KIND_FIFO_CONTEXT,
@@ -679,8 +678,6 @@ void task_destroy(Task *t) {
             break;
         case TASK_KIND_ITERATE:
             break;
-        case TASK_KIND_LESS_THAN:
-            UNIMPLEMENTED("task_destroy");
         case TASK_KIND_WAIT:
             break;
         case TASK_KIND_LOG:
@@ -803,8 +800,6 @@ Result task_poll(Task *t, Context *ctx) {
                     UNIMPLEMENTED("task_poll");
             }
             UNREACHABLE("invalid phase");
-        case TASK_KIND_LESS_THAN:
-            UNIMPLEMENTED("task_poll");
         case TASK_KIND_WAIT:
             if (!t->started) {
                 t->start = time(NULL);
