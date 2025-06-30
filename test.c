@@ -100,4 +100,30 @@ UTEST_F(Task_Const_Fixture, RESULT_KIND_STRING) {
     utest_fixture->pre = result_string(&utest_fixture->sb);
 }
 
+#define BOT_TOKEN "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+struct Build_URL_Fixture {
+    String_Builder sb;
+    Tg_Method_Call call;
+    char *expectation;
+};
+
+UTEST_F_SETUP(Build_URL_Fixture) {
+    utest_fixture->sb = string_builder_new();
+}
+
+UTEST_F_TEARDOWN(Build_URL_Fixture) {
+    build_url(&utest_fixture->sb, &utest_fixture->call);
+    ASSERT_STREQ(utest_fixture->sb.str, utest_fixture->expectation);
+}
+
+UTEST_F(Build_URL_Fixture, getMe) {
+    utest_fixture->call = new_tg_api_call_get_me(BOT_TOKEN);
+    utest_fixture->expectation = "https://api.telegram.org/bot" BOT_TOKEN "/getMe";
+}
+
+UTEST_F(Build_URL_Fixture, getUpdates) {
+    utest_fixture->call = new_tg_api_call_get_updates(BOT_TOKEN);
+    utest_fixture->expectation = "https://api.telegram.org/bot" BOT_TOKEN "/getUpdates";
+}
+
 UTEST_MAIN()

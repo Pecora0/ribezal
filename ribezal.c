@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #include "devutils.h"
+#include "tgapi.h"
 
 // thirdparty
 #include <curl/curl.h>
@@ -92,6 +93,10 @@ void string_builder_append(String_Builder *sb, char c) {
     return;
 }
 
+void string_builder_append_null(String_Builder *sb) {
+    string_builder_append(sb, '\0');
+}
+
 void string_builder_append_str(String_Builder *sb, const char *str) {
     while (*str != '\0') {
         string_builder_append(sb, *str);
@@ -115,6 +120,55 @@ CHECK_PRINTF_FMT(2, 3) int string_builder_printf(String_Builder *sb, char *forma
     assert(n >= 0);
     sb->count = n;
     return n;
+}
+
+CHECK_PRINTF_FMT(2, 3) int string_builder_appendf(String_Builder *sb, char *format, ...) {
+    UNUSED(sb);
+    UNUSED(format);
+    UNIMPLEMENTED("string_builder_appendf");
+}
+
+char *percent_encode(char *text) {
+    UNUSED(text);
+    UNIMPLEMENTED("percent_encode");
+}
+
+#define THUMBS_UP_SERIALIZED "[ { \"type\": \"emoji\", \"emoji\" : \"\U0001f44d\" } ]"
+
+void build_url(String_Builder *sb, Tg_Method_Call *call) {
+    string_builder_append_str(sb, URL_PREFIX);
+    string_builder_append_str(sb, call->bot_token);
+    string_builder_append_str(sb, "/");
+
+    switch (call->method) {
+        case GET_ME:
+            string_builder_append_str(sb, "getMe");
+            break;
+        case GET_UPDATES:
+            string_builder_append_str(sb, "getUpdates");
+            break;
+        case SEND_MESSAGE:
+            {
+                string_builder_append_str(sb, "sendMessage");
+                string_builder_append(sb, '?');
+                string_builder_appendf(sb, "char_id=%ld", call->chat_id);
+                string_builder_append(sb, '&');
+                string_builder_appendf(sb, "text=%s", percent_encode(call->text));
+                break;
+            }
+        case SET_MESSAGE_REACTION:
+            {
+                string_builder_append_str(sb, "setMessageReaction");
+                string_builder_append(sb, '?');
+                string_builder_appendf(sb, "chat_id=%ld", call->chat_id);
+                string_builder_append(sb, '&');
+                string_builder_appendf(sb, "message_id=%d", call->message_id);
+                string_builder_append(sb, '&');
+                string_builder_appendf(sb, "reaction=%s", percent_encode(THUMBS_UP_SERIALIZED));
+                break;
+            }
+    };
+    string_builder_append_null(sb);
 }
 
 typedef enum {
@@ -248,10 +302,6 @@ typedef struct {
     int x;
     int y;
     String_Builder *string;
-
-    // possible contexts
-    // bool has_fd;
-    // int fd;
 } Result;
 
 #define RESULT_DONE    (Result) {.state = STATE_DONE,    .kind = RESULT_KIND_VOID}

@@ -6,8 +6,8 @@ run: build/ribezal
 test: build/test
 	./build/test
 
-build/ribezal: ribezal.c devutils.h
+build/ribezal: ribezal.c devutils.h tgapi.h
 	gcc -Wall -Wextra -Werror -o build/ribezal ribezal.c -lcurl
 
-build/test: test.c thirdparty/utest.h
+build/test: test.c thirdparty/utest.h tgapi.h
 	gcc -Wall -Ithirdparty/ -o build/test test.c -lcurl
