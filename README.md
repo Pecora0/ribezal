@@ -37,7 +37,8 @@ There are the following keywords:
 - `drop`
 - `clear`
 - `+`, `-`, `*`, `/`
-- request
+- `request`
+- `tg-getMe`
 
 ## Shoutouts
 

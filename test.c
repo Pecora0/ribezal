@@ -118,12 +118,12 @@ UTEST_F_TEARDOWN(Build_URL_Fixture) {
 
 UTEST_F(Build_URL_Fixture, getMe) {
     utest_fixture->call = new_tg_api_call_get_me(BOT_TOKEN);
-    utest_fixture->expectation = "https://api.telegram.org/bot" BOT_TOKEN "/getMe";
+    utest_fixture->expectation = URL_PREFIX BOT_TOKEN "/getMe";
 }
 
 UTEST_F(Build_URL_Fixture, getUpdates) {
     utest_fixture->call = new_tg_api_call_get_updates(BOT_TOKEN);
-    utest_fixture->expectation = "https://api.telegram.org/bot" BOT_TOKEN "/getUpdates";
+    utest_fixture->expectation = URL_PREFIX BOT_TOKEN "/getUpdates";
 }
 
 UTEST_MAIN()

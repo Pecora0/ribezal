@@ -188,6 +188,8 @@ typedef struct {
 Stack_Value stack[MAX_STACK_SIZE];
 size_t stack_count = 0;
 
+#define STACK_TOP (stack[stack_count-1])
+
 void stack_push_string(char *str) {
     size_t l = strlen(str);
     char *dest = malloc((l+1)*sizeof(char));
@@ -712,6 +714,17 @@ Reply_Kind execute(char *prog) {
                 return REPLY_ACK;
             }
             return REPLY_ERROR;
+        } else if (strcmp(token, "tg-getMe") == 0) {
+            if (stack_string()) {
+                char *token = STACK_TOP.str;
+                String_Builder sb = string_builder_new();
+                Tg_Method_Call call = new_tg_api_call_get_me(token);
+                build_url(&sb, &call);
+
+                stack_drop();
+                stack_push_string(sb.str);
+                string_builder_destroy(sb);
+            }
         } else if (strcmp(token, "+") == 0) {
             if (stack_two_int()) {
                 int x = stack[stack_count-1].x;
@@ -911,6 +924,7 @@ Result task_poll(Task *t, Context *ctx) {
                 } else if (r > 0) {
                     assert(r < READ_BUF_CAPACITY);
                     read_buf[r] = '\0';
+                    // TODO: when a command is longer than READ_BUF_CAPACITY only a part of the command is passed to execute
                     switch (execute(read_buf)) {
                         case REPLY_CLOSE:
                             return RESULT_DONE;
