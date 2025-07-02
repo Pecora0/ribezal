@@ -1,4 +1,4 @@
-all: build/ribezal
+all: build/ribezal README.md
 
 run: build/ribezal
 	./build/ribezal &
@@ -6,8 +6,17 @@ run: build/ribezal
 test: build/test
 	./build/test
 
-build/ribezal: ribezal.c devutils.h tgapi.h
+clean:
+	rm ./build/*
+
+README.md: build/generate-readme
+	./build/generate-readme
+
+build/ribezal: ribezal.c devutils.h tgapi.h command.h
 	gcc -Wall -Wextra -Werror -o build/ribezal ribezal.c -lcurl
 
-build/test: test.c thirdparty/utest.h tgapi.h
+build/test: ribezal.c test.c thirdparty/utest.h tgapi.h command.h
 	gcc -Wall -Ithirdparty/ -o build/test test.c -lcurl
+
+build/generate-readme: generate-readme.c command.h
+	gcc -Wall -Wextra -Werror -o build/generate-readme generate-readme.c

@@ -14,6 +14,7 @@
 
 #include "devutils.h"
 #include "tgapi.h"
+#include "command.h"
 
 // thirdparty
 #include <curl/curl.h>
@@ -221,17 +222,22 @@ void stack_drop() {
     stack_count--;
 }
 
-bool stack_two_int() {
-    if (stack_count < 2) return false;
-    size_t i1 = stack_count-1;
-    size_t i2 = stack_count-2;
-    return (stack[i1].kind == STACK_VALUE_INT) && (stack[i2].kind == STACK_VALUE_INT);
+bool stack_int() {
+    if (stack_count < 1) return false;
+    return STACK_TOP.kind == STACK_VALUE_INT;
 }
 
 bool stack_string() {
     if (stack_count < 1) return false;
     size_t i = stack_count-1;
     return stack[i].kind == STACK_VALUE_STRING;
+}
+
+bool stack_two_int() {
+    if (stack_count < 2) return false;
+    size_t i1 = stack_count-1;
+    size_t i2 = stack_count-2;
+    return (stack[i1].kind == STACK_VALUE_INT) && (stack[i2].kind == STACK_VALUE_INT);
 }
 
 void stack_print() {
@@ -683,83 +689,116 @@ typedef enum {
 
 #define SPACES " \f\n\r\t\v"
 
+Reply_Kind command_execute(Command c) {
+    switch (c) {
+        case HELP:
+            printf("[HELP] The following commands are accepted:\n");
+            for (Command i=0; i<COMMAND_COUNT; i++) {
+                printf("[HELP] \"%s\"\n", command_keyword[i]);
+                printf("[HELP]     Stack: %s\n", command_stack_config[i]);
+                printf("[HELP]     Description: %s\n", command_description[i]);
+            }
+            return REPLY_ACK;
+        case QUIT:
+            return REPLY_CLOSE;
+        case PRINT:
+            stack_print();
+            return REPLY_ACK;
+        case DROP:
+            stack_drop();
+            return REPLY_ACK;
+        case CLEAR:
+        case REQUEST:
+        case TG_GETME:
+            UNIMPLEMENTED("command_execute");
+        case PLUS:
+            if (stack_two_int()) {
+                int x = stack[stack_count-1].x;
+                stack_drop();
+                stack[stack_count-1].x += x;
+            }
+            return REPLY_ACK;
+        case MINUS:
+            if (stack_two_int()) {
+                int x = stack[stack_count-1].x;
+                stack_drop();
+                stack[stack_count-1].x -= x;
+            }
+            return REPLY_ACK;
+        case TIMES:
+            if (stack_two_int()) {
+                int x = stack[stack_count-1].x;
+                stack_drop();
+                stack[stack_count-1].x *= x;
+            }
+            return REPLY_ACK;
+        case DIVIDE:
+            if (stack_two_int()) {
+                int x = stack[stack_count-1].x;
+                stack_drop();
+                stack[stack_count-1].x /= x;
+            }
+            return REPLY_ACK;
+        case COMMAND_COUNT:
+            UNREACHABLE("COMMAND_COUNT is not a valid Command");
+    }
+    UNREACHABLE("no valid Command");
+}
+
+bool all_graph(const char *c) {
+    for (;*c != '\0'; c++) {
+        if (!isgraph(*c)) return false;
+    }
+    return true;
+}
+
 Reply_Kind execute(char *prog) {
     for (char *token = strtok(prog, SPACES); token != NULL; token = strtok(NULL, SPACES)) {
         char *endptr;
         int val = strtol(token, &endptr, 10);
         if (*endptr == '\0') {
             stack_push_int(val);
-        } else if (strcmp(token, "quit") == 0) {
-            return REPLY_CLOSE;
-        } else if (strcmp(token, "print") == 0) {
-            stack_print();
-        } else if (strcmp(token, "drop") == 0) {
-            stack_drop();
-        } else if (strcmp(token, "clear") == 0) {
-            while (stack_count > 0) stack_drop();
-        } else if (strcmp(token, "request") == 0) {
-            if (stack_string()) {
-                char *url = stack[stack_count-1].str;
-                task_par_append(runner, 
-                        task_curl_global_context(
-                            task_string_builder_context(
-                                task_curl_easy_context(
-                                    task_then(task_string_builder_this(), task_curl_perform)
-                                    ), 
-                                url
-                                )
-                            )
-                        );
-                stack_drop();
-                return REPLY_ACK;
+        } else if (all_graph(token)) {
+            for (Command i=0; i<COMMAND_COUNT; i++) {
+                if (strcmp(token, command_keyword[i]) == 0) {
+                    Reply_Kind r = command_execute(i);
+                    return r;
+                }
             }
-            return REPLY_ERROR;
-        } else if (strcmp(token, "tg-getMe") == 0) {
-            if (stack_string()) {
-                char *token = STACK_TOP.str;
-                String_Builder sb = string_builder_new();
-                Tg_Method_Call call = new_tg_api_call_get_me(token);
-                build_url(&sb, &call);
-
-                stack_drop();
-                stack_push_string(sb.str);
-                string_builder_destroy(sb);
-            }
-        } else if (strcmp(token, "+") == 0) {
-            if (stack_two_int()) {
-                int x = stack[stack_count-1].x;
-                stack_drop();
-                stack[stack_count-1].x += x;
-            }
-        } else if (strcmp(token, "-") == 0) {
-            if (stack_two_int()) {
-                int x = stack[stack_count-1].x;
-                stack_drop();
-                stack[stack_count-1].x -= x;
-            }
-        } else if (strcmp(token, "*") == 0) {
-            if (stack_two_int()) {
-                int x = stack[stack_count-1].x;
-                stack_drop();
-                stack[stack_count-1].x *= x;
-            }
-        } else if (strcmp(token, "/") == 0) {
-            if (stack_two_int()) {
-                int x = stack[stack_count-1].x;
-                stack_drop();
-                stack[stack_count-1].x /= x;
-            }
+            stack_push_string(token);
         } else {
-            bool all_graph = true;
-            for (char *c = token; *c != '\0'; c++) {
-                all_graph = all_graph && isgraph(*c);
-            }
-            if (all_graph) {
-                stack_push_string(token);
-            } else {
-                return REPLY_REJECT;
-            }
+            return REPLY_REJECT;
         }
+        // } else if (strcmp(token, "clear") == 0) {
+        //     while (stack_count > 0) stack_drop();
+        // } else if (strcmp(token, "request") == 0) {
+        //     if (stack_string()) {
+        //         char *url = stack[stack_count-1].str;
+        //         task_par_append(runner, 
+        //                 task_curl_global_context(
+        //                     task_string_builder_context(
+        //                         task_curl_easy_context(
+        //                             task_then(task_string_builder_this(), task_curl_perform)
+        //                             ), 
+        //                         url
+        //                         )
+        //                     )
+        //                 );
+        //         stack_drop();
+        //         return REPLY_ACK;
+        //     }
+        //     return REPLY_ERROR;
+        // } else if (strcmp(token, "tg-getMe") == 0) {
+        //     if (stack_string()) {
+        //         char *token = STACK_TOP.str;
+        //         String_Builder sb = string_builder_new();
+        //         Tg_Method_Call call = new_tg_api_call_get_me(token);
+        //         build_url(&sb, &call);
+
+        //         stack_drop();
+        //         stack_push_string(sb.str);
+        //         string_builder_destroy(sb);
+        //     }
     }
     return REPLY_ACK;
 }

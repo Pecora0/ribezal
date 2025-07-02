@@ -126,4 +126,171 @@ UTEST_F(Build_URL_Fixture, getUpdates) {
     utest_fixture->expectation = URL_PREFIX BOT_TOKEN "/getUpdates";
 }
 
+UTEST(stack, int) {
+    int x = 42;
+
+    size_t stack_count_pre = stack_count;
+    stack_push_int(x);
+    ASSERT_EQ(stack_count, stack_count_pre+1);
+    ASSERT_TRUE(stack_int());
+    ASSERT_EQ(x, STACK_TOP.x);
+
+    stack_count = 0;
+}
+
+UTEST(stack, string) {
+    char *str = "moin";
+
+    size_t stack_count_pre = stack_count;
+    stack_push_string(str);
+    ASSERT_EQ(stack_count, stack_count_pre+1);
+    ASSERT_TRUE(stack_string());
+    ASSERT_STREQ(str, STACK_TOP.str);
+
+    stack_count = 0;
+}
+
+UTEST(execute, empty) {
+    size_t stack_count_pre = stack_count;
+    Reply_Kind r = execute("");
+    ASSERT_EQ(r, REPLY_ACK);
+    ASSERT_EQ(stack_count, stack_count_pre);
+
+    stack_count = 0;
+}
+
+UTEST(execute, string) {
+    size_t stack_count_pre = stack_count;
+    Reply_Kind r = execute("hello");
+    ASSERT_EQ(r, REPLY_ACK);
+    ASSERT_EQ(stack_count, stack_count_pre + 1);
+    ASSERT_TRUE(stack_string());
+
+    stack_count = 0;
+}
+
+UTEST(execute, int) {
+    size_t stack_count_pre = stack_count;
+    Reply_Kind r = execute("123");
+    ASSERT_EQ(r, REPLY_ACK);
+    ASSERT_EQ(stack_count, stack_count_pre + 1);
+    ASSERT_TRUE(stack_int());
+
+    stack_count = 0;
+}
+
+UTEST(execute, quit) {
+    size_t stack_count_pre = stack_count;
+    Reply_Kind r = execute("quit");
+    ASSERT_EQ(r, REPLY_CLOSE);
+    ASSERT_EQ(stack_count, stack_count_pre);
+
+    stack_count = 0;
+}
+
+UTEST(execute, drop) {
+    stack_push_string("hello");
+    stack_push_string("world");
+    stack_push_int(-8);
+    size_t stack_count_pre = stack_count;
+    Reply_Kind r = execute("drop");
+    ASSERT_EQ(r, REPLY_ACK);
+    ASSERT_EQ(stack_count + 1, stack_count_pre);
+
+    stack_count = 0;
+}
+
+UTEST(execute, plus) {
+    int x = 2;
+    int y = 3;
+
+    stack_push_int(x);
+    stack_push_int(y);
+    ASSERT_TRUE(stack_two_int());
+    size_t stack_count_pre = stack_count;
+    Reply_Kind r = execute("+");
+    ASSERT_EQ(r, REPLY_ACK);
+    ASSERT_EQ(stack_count + 1, stack_count_pre);
+    ASSERT_TRUE(stack_int());
+    ASSERT_EQ(STACK_TOP.x, x + y);
+
+    stack_count = 0;
+}
+
+UTEST(execute, minus) {
+    int x = 2;
+    int y = 3;
+
+    stack_push_int(x);
+    stack_push_int(y);
+    ASSERT_TRUE(stack_two_int());
+    size_t stack_count_pre = stack_count;
+    Reply_Kind r = execute("-");
+    ASSERT_EQ(r, REPLY_ACK);
+    ASSERT_EQ(stack_count + 1, stack_count_pre);
+    ASSERT_TRUE(stack_int());
+    ASSERT_EQ(STACK_TOP.x, x - y);
+
+    stack_count = 0;
+}
+
+UTEST(execute, times) {
+    int x = 2;
+    int y = 3;
+
+    stack_push_int(x);
+    stack_push_int(y);
+    ASSERT_TRUE(stack_two_int());
+    size_t stack_count_pre = stack_count;
+    Reply_Kind r = execute("*");
+    ASSERT_EQ(r, REPLY_ACK);
+    ASSERT_EQ(stack_count + 1, stack_count_pre);
+    ASSERT_TRUE(stack_int());
+    ASSERT_EQ(STACK_TOP.x, x * y);
+
+    stack_count = 0;
+}
+
+UTEST(execute, divide) {
+    int x = 2;
+    int y = 3;
+
+    stack_push_int(x);
+    stack_push_int(y);
+    ASSERT_TRUE(stack_two_int());
+    size_t stack_count_pre = stack_count;
+    Reply_Kind r = execute("/");
+    ASSERT_EQ(r, REPLY_ACK);
+    ASSERT_EQ(stack_count + 1, stack_count_pre);
+    ASSERT_TRUE(stack_int());
+    ASSERT_EQ(STACK_TOP.x, x / y);
+
+    stack_count = 0;
+}
+
+typedef struct {
+    const char *prog;
+    int result;
+} Arithmetic_Case;
+
+Arithmetic_Case program_list[] = {
+    {"2 3 +", 5},
+    {"2 3 *", 6},
+};
+#define PROGRAM_LIST_COUNT (sizeof(program_list) / sizeof(program_list[0]))
+
+UTEST(execute, arithmetic) {
+    String_Builder sb = string_builder_new();
+    for (size_t i=0; i<PROGRAM_LIST_COUNT; i++) {
+        string_builder_clear(&sb);
+        string_builder_append_str(&sb, program_list[i].prog);
+        string_builder_append_null(&sb);
+
+        Reply_Kind r = execute(sb.str);
+        ASSERT_EQ(r, REPLY_ACK);
+        ASSERT_TRUE(stack_int());
+        ASSERT_EQ(STACK_TOP.x, program_list[i].result);
+    }
+}
+
 UTEST_MAIN()

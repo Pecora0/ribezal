@@ -32,13 +32,39 @@ Integers are recognised as such and pushed to the stack.
 All commands that are not integers or keywords are pushed as strings to the strings.
 
 There are the following keywords:
-- `quit`
-- `print`
-- `drop`
-- `clear`
-- `+`, `-`, `*`, `/`
-- `request`
-- `tg-getMe`
+- `help`:
+    - Stack: (->)
+    - Description: Prints documentation for the commands.
+- `quit`:
+    - Stack: (->)
+    - Description: Closes this repl.
+- `print`:
+    - Stack: (->)
+    - Description: Prints out the current stack.
+- `drop`:
+    - Stack: *no stack configuration provided*
+    - Description: *no description provided*
+- `clear`:
+    - Stack: *no stack configuration provided*
+    - Description: *no description provided*
+- `request`:
+    - Stack: *no stack configuration provided*
+    - Description: *no description provided*
+- `tg-getMe`:
+    - Stack: *no stack configuration provided*
+    - Description: *no description provided*
+- `+`:
+    - Stack: *no stack configuration provided*
+    - Description: *no description provided*
+- `-`:
+    - Stack: *no stack configuration provided*
+    - Description: *no description provided*
+- `*`:
+    - Stack: *no stack configuration provided*
+    - Description: *no description provided*
+- `/`:
+    - Stack: *no stack configuration provided*
+    - Description: *no description provided*
 
 ## Shoutouts
 
