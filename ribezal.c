@@ -263,35 +263,32 @@ void stack_print() {
 int make_and_open_fifo() {
     if (mkfifo(FIFO_NAME, 0666) < 0) {
         printf("[ERROR] Could not make fifo '%s': %s\n", FIFO_NAME, strerror(errno));
-        // TODO: Maybe don't kill the program just the current Task
-        exit(1);
+        return -1;
     }
     int fd = open(FIFO_NAME, O_RDONLY | O_NONBLOCK);
     if (fd < 0) {
         printf("[ERROR] Could not open file '%s': %s\n", FIFO_NAME, strerror(errno));
-        // TODO: Maybe don't kill the program just the current Task
-        exit(1);
+        return -1;
     }
     return fd;
 }
 
-void close_and_unlink_fifo(int fd) {
+bool close_and_unlink_fifo(int fd) {
     if (close(fd) < 0) {
         printf("[ERROR] Could not close file: %s\n", strerror(errno));
-        // TODO: Maybe don't kill the program just the current Task
-        exit(1);
+        return false;
     }
     if (unlink(FIFO_NAME) < 0) {
         printf("[ERROR] Could not unlink file: %s\n", strerror(errno));
-        // TODO: Maybe don't kill the program just the current Task
-        exit(1);
+        return false;
     }
+    return true;
 }
 
-// TODO: error state
 typedef enum {
     STATE_DONE,
     STATE_PENDING,
+    STATE_ERROR,
 } State;
 
 typedef enum {
@@ -314,6 +311,7 @@ typedef struct {
 
 #define RESULT_DONE    (Result) {.state = STATE_DONE,    .kind = RESULT_KIND_VOID}
 #define RESULT_PENDING (Result) {.state = STATE_PENDING, .kind = RESULT_KIND_VOID}
+#define RESULT_ERROR   (Result) {.state = STATE_ERROR,   .kind = RESULT_KIND_VOID}
 
 Result result_bool(bool b) {
     Result r = RESULT_DONE;
@@ -390,9 +388,10 @@ void context_add_fifo(Context *c) {
     c->file_descriptor = make_and_open_fifo();
 }
 
-void context_remove_fifo(Context *c) {
-    close_and_unlink_fifo(c->file_descriptor);
+bool context_remove_fifo(Context *c) {
+    bool success = close_and_unlink_fifo(c->file_descriptor);
     c->flag[CONTEXT_KIND_FIFO] = false;
+    return success;
 }
 
 void context_add_curl_global(Context *c) {
@@ -735,8 +734,9 @@ Reply_Kind command_execute(Command c) {
                 string_builder_append_null(&temp);
                 stack_push_string(temp.str);
                 string_builder_destroy(temp);
+                return REPLY_ACK;
             }
-            return REPLY_ACK;
+            return REPLY_ERROR;
         case TG_GETUPDATES:
             if (stack_string()) {
                 String_Builder temp = string_builder_new();
@@ -746,36 +746,41 @@ Reply_Kind command_execute(Command c) {
                 string_builder_append_null(&temp);
                 stack_push_string(temp.str);
                 string_builder_destroy(temp);
+                return REPLY_ACK;
             }
-            return REPLY_ACK;
+            return REPLY_ERROR;
         case PLUS:
             if (stack_two_int()) {
                 int x = stack[stack_count-1].x;
                 stack_drop();
                 stack[stack_count-1].x += x;
+                return REPLY_ACK;
             }
-            return REPLY_ACK;
+            return REPLY_ERROR;
         case MINUS:
             if (stack_two_int()) {
                 int x = stack[stack_count-1].x;
                 stack_drop();
                 stack[stack_count-1].x -= x;
+                return REPLY_ACK;
             }
-            return REPLY_ACK;
+            return REPLY_ERROR;
         case TIMES:
             if (stack_two_int()) {
                 int x = stack[stack_count-1].x;
                 stack_drop();
                 stack[stack_count-1].x *= x;
+                return REPLY_ACK;
             }
-            return REPLY_ACK;
+            return REPLY_ERROR;
         case DIVIDE:
             if (stack_two_int()) {
                 int x = stack[stack_count-1].x;
                 stack_drop();
                 stack[stack_count-1].x /= x;
+                return REPLY_ACK;
             }
-            return REPLY_ACK;
+            return REPLY_ERROR;
         case COMMAND_COUNT:
             UNREACHABLE("COMMAND_COUNT is not a valid Command");
     }
@@ -871,6 +876,9 @@ Result task_poll(Task *t, Context *ctx) {
                         if (t->seq_index == t->seq_count) return r;
                         break;
                     case STATE_PENDING:
+                        break;
+                    case STATE_ERROR:
+                        UNIMPLEMENTED("task_poll");
                 }
                 return RESULT_PENDING;
             }
@@ -880,6 +888,7 @@ Result task_poll(Task *t, Context *ctx) {
                 context_merge(t->sub_ctx + t->par_index, *ctx);
                 Result r = task_poll(t->par[t->par_index], t->sub_ctx + t->par_index);
                 switch (r.state) {
+                    case STATE_ERROR:
                     case STATE_DONE:
                         task_destroy(t->par[t->par_index]);
                         t->par[t->par_index] = t->par[t->par_count - 1];
@@ -904,6 +913,8 @@ Result task_poll(Task *t, Context *ctx) {
                         break;
                     case STATE_PENDING:
                         break;
+                    case STATE_ERROR:
+                        return r;
                 }
                 return RESULT_PENDING;
             }
@@ -914,6 +925,8 @@ Result task_poll(Task *t, Context *ctx) {
                     break;
                 case STATE_PENDING:
                     break;
+                case STATE_ERROR:
+                    return r;
             }
             return r;
         case TASK_KIND_ITERATE:
@@ -930,6 +943,8 @@ Result task_poll(Task *t, Context *ctx) {
                             break;
                         case STATE_PENDING:
                             break;
+                        case STATE_ERROR:
+                            UNIMPLEMENTED("task_poll");
                     }
                     return RESULT_PENDING;
                 case 1:
@@ -949,6 +964,8 @@ Result task_poll(Task *t, Context *ctx) {
                                 return t->last;
                             }
                         case STATE_PENDING:
+                            UNIMPLEMENTED("task_poll");
+                        case STATE_ERROR:
                             UNIMPLEMENTED("task_poll");
                     }
                     UNIMPLEMENTED("task_poll");
@@ -985,13 +1002,13 @@ Result task_poll(Task *t, Context *ctx) {
                         case REPLY_ACK:
                             return RESULT_PENDING;
                         case REPLY_ERROR:
-                            printf("Command caused non-fatal error\n");
+                            printf("[ERROR] Command caused error, try again\n");
                             return RESULT_PENDING;
                     }
                     UNREACHABLE("invalid Result_Kind");
                 } else {
                     printf("[ERROR] Could not read from file: %s\n", strerror(errno));
-                    exit(1);
+                    return RESULT_ERROR;
                 }
             }
         case TASK_KIND_CONTEXT:
@@ -1007,12 +1024,14 @@ Result task_poll(Task *t, Context *ctx) {
                         assert(t->context_body != NULL);
                         Result r = task_poll(t->context_body, ctx);
                         switch (r.state) {
+                            case STATE_ERROR:
                             case STATE_DONE:
                                 task_destroy(t->context_body);
                                 t->context_body = NULL;
                                 context_remove_string_builder(ctx);
                                 break;
                             case STATE_PENDING:
+                                break;
                         }
                         return r;
                     }
@@ -1021,14 +1040,16 @@ Result task_poll(Task *t, Context *ctx) {
                         assert(!ctx->flag[CONTEXT_KIND_FIFO]);
                         t->context_is_init = true;
                         context_add_fifo(ctx);
+                        if (ctx->file_descriptor < 0) return RESULT_ERROR;
                         printf("[INFO] opened fifo successfully\n");
                         return RESULT_PENDING;
                     }
                     Result ret = task_poll(t->context_body, ctx);
                     switch (ret.state) {
+                        case STATE_ERROR:
                         case STATE_DONE:
                             task_destroy(t->context_body);
-                            context_remove_fifo(ctx);
+                            if (!context_remove_fifo(ctx)) return RESULT_ERROR;
                             printf("[INFO] closed fifo successfully\n");
                             break;
                         case STATE_PENDING:
@@ -1043,6 +1064,7 @@ Result task_poll(Task *t, Context *ctx) {
                         }
                         Result r = task_poll(t->context_body, ctx);
                         switch (r.state) {
+                            case STATE_ERROR:
                             case STATE_DONE:
                                 task_destroy(t->context_body);
                                 context_remove_curl_global(ctx);
@@ -1076,6 +1098,8 @@ Result task_poll(Task *t, Context *ctx) {
                                 break;
                             case STATE_PENDING:
                                 UNIMPLEMENTED("task_poll");
+                            case STATE_ERROR:
+                                UNIMPLEMENTED("task_poll");
                         }
                         return r;
                     }
@@ -1091,6 +1115,7 @@ Result task_poll(Task *t, Context *ctx) {
                         assert(t->context_body != NULL);
                         Result r = task_poll(t->context_body, ctx);
                         switch (r.state) {
+                            case STATE_ERROR:
                             case STATE_DONE:
                                 task_destroy(t->context_body);
                                 context_remove_curl_easy(ctx);
@@ -1115,12 +1140,12 @@ Result task_poll(Task *t, Context *ctx) {
             if (code != CURLE_OK) {
                 printf("[ERROR] tried to set url '%s'\n", t->url);
                 printf("[ERROR] failed curl_easy_setopt: %s\n", curl_easy_strerror(code));
-                exit(1);
+                return RESULT_ERROR;
             }
             code = curl_easy_perform(ctx->easy_handle);
             if (code != CURLE_OK) {
                 printf("[ERROR] failed curl_easy_perform to url '%s': %s\n", t->url, curl_easy_strerror(code));
-                exit(1);
+                return RESULT_ERROR;
             }
             fflush(stdout); // to make sure we can see the data
             return RESULT_DONE;
