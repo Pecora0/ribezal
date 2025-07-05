@@ -42,29 +42,29 @@ There are the following keywords:
     - Stack: (->)
     - Description: Prints out the current stack.
 - `drop`:
-    - Stack: *no stack configuration provided*
-    - Description: *no description provided*
+    - Stack: *tbd*
+    - Description: Removes the top element from stack.
 - `clear`:
-    - Stack: *no stack configuration provided*
-    - Description: *no description provided*
+    - Stack: *tbd*
+    - Description: Removes all elements from stack.
 - `request`:
-    - Stack: *no stack configuration provided*
-    - Description: *no description provided*
+    - Stack: (string ->)
+    - Description: Performs Https-Request to the given URL.
 - `tg-getMe`:
-    - Stack: *no stack configuration provided*
-    - Description: *no description provided*
+    - Stack: (string -> string)
+    - Description: Constructs the URL for the Telegram method "getMe" out of the given bot token.
 - `+`:
-    - Stack: *no stack configuration provided*
-    - Description: *no description provided*
+    - Stack: (int int -> int)
+    - Description: Adds two numbers.
 - `-`:
-    - Stack: *no stack configuration provided*
-    - Description: *no description provided*
+    - Stack: (int int -> int)
+    - Description: Subtracts one number from the other.
 - `*`:
-    - Stack: *no stack configuration provided*
-    - Description: *no description provided*
+    - Stack: (int int -> int)
+    - Description: Multiplies two numbers.
 - `/`:
-    - Stack: *no stack configuration provided*
-    - Description: *no description provided*
+    - Stack: (int int -> int)
+    - Description: Divides one number by the other.
 
 ## Shoutouts
 
