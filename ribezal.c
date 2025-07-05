@@ -708,9 +708,36 @@ Reply_Kind command_execute(Command c) {
             stack_drop();
             return REPLY_ACK;
         case CLEAR:
+            while (stack_count > 0) stack_drop();
+            return REPLY_ACK;
         case REQUEST:
+            if (stack_string()) {
+                char *url = stack[stack_count-1].str;
+                task_par_append(runner, 
+                        task_curl_global_context(
+                            task_string_builder_context(
+                                task_curl_easy_context(
+                                    task_then(task_string_builder_this(), task_curl_perform)
+                                    ), 
+                                url
+                                )
+                            )
+                        );
+                stack_drop();
+                return REPLY_ACK;
+            }
+            return REPLY_ERROR;
         case TG_GETME:
-            UNIMPLEMENTED("command_execute");
+            if (stack_string()) {
+                String_Builder temp = string_builder_new();
+                Tg_Method_Call call = new_tg_api_call_get_me(STACK_TOP.str);
+                build_url(&temp, &call);
+                stack_drop();
+                string_builder_append_null(&temp);
+                stack_push_string(temp.str);
+                string_builder_destroy(temp);
+            }
+            return REPLY_ACK;
         case PLUS:
             if (stack_two_int()) {
                 int x = stack[stack_count-1].x;
@@ -759,52 +786,31 @@ Reply_Kind execute(char *prog) {
         if (*endptr == '\0') {
             stack_push_int(val);
         } else if (all_graph(token)) {
-            for (Command i=0; i<COMMAND_COUNT; i++) {
+            bool matched = false;
+            for (Command i=0; i<COMMAND_COUNT && !matched; i++) {
                 if (strcmp(token, command_keyword[i]) == 0) {
+                    matched = true;
                     Reply_Kind r = command_execute(i);
-                    return r;
+                    switch (r) {
+                        case REPLY_ACK:
+                            break;
+                        case REPLY_CLOSE:
+                        case REPLY_REJECT:
+                        case REPLY_ERROR:
+                            return r;
+                    }
                 }
             }
-            stack_push_string(token);
+            if (!matched) stack_push_string(token);
         } else {
             return REPLY_REJECT;
         }
-        // } else if (strcmp(token, "clear") == 0) {
-        //     while (stack_count > 0) stack_drop();
-        // } else if (strcmp(token, "request") == 0) {
-        //     if (stack_string()) {
-        //         char *url = stack[stack_count-1].str;
-        //         task_par_append(runner, 
-        //                 task_curl_global_context(
-        //                     task_string_builder_context(
-        //                         task_curl_easy_context(
-        //                             task_then(task_string_builder_this(), task_curl_perform)
-        //                             ), 
-        //                         url
-        //                         )
-        //                     )
-        //                 );
-        //         stack_drop();
-        //         return REPLY_ACK;
-        //     }
-        //     return REPLY_ERROR;
-        // } else if (strcmp(token, "tg-getMe") == 0) {
-        //     if (stack_string()) {
-        //         char *token = STACK_TOP.str;
-        //         String_Builder sb = string_builder_new();
-        //         Tg_Method_Call call = new_tg_api_call_get_me(token);
-        //         build_url(&sb, &call);
-
-        //         stack_drop();
-        //         stack_push_string(sb.str);
-        //         string_builder_destroy(sb);
-        //     }
     }
     return REPLY_ACK;
 }
 
 // TODO: multiple read tasks can use this so every read task should have its own
-#define READ_BUF_CAPACITY 32
+#define READ_BUF_CAPACITY 64
 char read_buf[READ_BUF_CAPACITY];
 
 void task_destroy(Task *t) {
@@ -1107,9 +1113,10 @@ Result task_poll(Task *t, Context *ctx) {
             }
             code = curl_easy_perform(ctx->easy_handle);
             if (code != CURLE_OK) {
-                printf("[ERROR] failed curl_easy_perform: %s\n", curl_easy_strerror(code));
+                printf("[ERROR] failed curl_easy_perform to url '%s': %s\n", t->url, curl_easy_strerror(code));
                 exit(1);
             }
+            fflush(stdout); // to make sure we can see the data
             return RESULT_DONE;
         case TASK_KIND_COUNTER_STRING:
             assert(ctx->flag[CONTEXT_KIND_STRING_BUILDER]);
