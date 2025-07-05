@@ -683,7 +683,6 @@ Task *task_string_builder_this() {
 typedef enum {
     REPLY_CLOSE,
     REPLY_ACK,
-    REPLY_REJECT,
     REPLY_ERROR,
 } Reply_Kind;
 
@@ -795,7 +794,6 @@ Reply_Kind execute(char *prog) {
                         case REPLY_ACK:
                             break;
                         case REPLY_CLOSE:
-                        case REPLY_REJECT:
                         case REPLY_ERROR:
                             return r;
                     }
@@ -803,7 +801,7 @@ Reply_Kind execute(char *prog) {
             }
             if (!matched) stack_push_string(token);
         } else {
-            return REPLY_REJECT;
+            return REPLY_ERROR;
         }
     }
     return REPLY_ACK;
@@ -973,9 +971,6 @@ Result task_poll(Task *t, Context *ctx) {
                     switch (execute(read_buf)) {
                         case REPLY_CLOSE:
                             return RESULT_DONE;
-                        case REPLY_REJECT:
-                            printf("Unknown command\n");
-                            return RESULT_PENDING;
                         case REPLY_ACK:
                             return RESULT_PENDING;
                         case REPLY_ERROR:
