@@ -50,9 +50,6 @@ There are the following keywords:
 - `request`:
     - Stack: (string ->)
     - Description: Performs Https-Request to the given URL.
-- `tg-getMe`:
-    - Stack: (string -> string)
-    - Description: Constructs the URL for the Telegram method "getMe" out of the given bot token.
 - `+`:
     - Stack: (int int -> int)
     - Description: Adds two numbers.
@@ -65,6 +62,12 @@ There are the following keywords:
 - `/`:
     - Stack: (int int -> int)
     - Description: Divides one number by the other.
+- `tg-getMe`:
+    - Stack: (string ->)
+    - Description: Constructs the URL for the Telegram method "getMe" out of the given bot token.
+- `tg-getUpdates`:
+    - Stack: (string ->)
+    - Description: Constructs the URL for the Telegram method "getUpdates" out of the given bot token.
 
 ## Shoutouts
 

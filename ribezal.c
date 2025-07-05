@@ -737,6 +737,17 @@ Reply_Kind command_execute(Command c) {
                 string_builder_destroy(temp);
             }
             return REPLY_ACK;
+        case TG_GETUPDATES:
+            if (stack_string()) {
+                String_Builder temp = string_builder_new();
+                Tg_Method_Call call = new_tg_api_call_get_updates(STACK_TOP.str);
+                build_url(&temp, &call);
+                stack_drop();
+                string_builder_append_null(&temp);
+                stack_push_string(temp.str);
+                string_builder_destroy(temp);
+            }
+            return REPLY_ACK;
         case PLUS:
             if (stack_two_int()) {
                 int x = stack[stack_count-1].x;
