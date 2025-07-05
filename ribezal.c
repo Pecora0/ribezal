@@ -65,6 +65,7 @@ String_Builder string_builder_new() {
     sb.count = 0;
     sb.capacity = STRING_BUILDER_INITIAL_CAPACITY;
     sb.str = malloc(sizeof(char) * sb.capacity);
+    sb.str[0] = '\0';
     return sb;
 }
 
@@ -88,14 +89,19 @@ void string_builder_grow(String_Builder *sb) {
 }
 
 void string_builder_append(String_Builder *sb, char c) {
-    while (sb->count >= sb->capacity) string_builder_grow(sb);
+    while (sb->count >= sb->capacity + 1) string_builder_grow(sb);
     sb->str[sb->count] = c;
     sb->count++;
+    sb->str[sb->count] = '\0';
     return;
 }
 
+// TODO: I do not want to have this function. Every other string_builder_* function should take care to append a zero to the string.
+// I keep this for now to be sure but make it just an assertion.
+// Remove this when string_builder_appendf was implemented and tested.
 void string_builder_append_null(String_Builder *sb) {
-    string_builder_append(sb, '\0');
+    assert(sb->count < sb->capacity);
+    assert(sb->str[sb->count] == '\0');
 }
 
 void string_builder_append_str(String_Builder *sb, const char *str) {

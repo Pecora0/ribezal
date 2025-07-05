@@ -7,15 +7,18 @@ struct String_Builder_Fixture {
     String_Builder sb;
 };
 
+#define ASSERT_ZERO_TERMINATION(sb) do { ASSERT_LT((sb).count, (sb).capacity); ASSERT_EQ('\0', (sb).str[(sb).count]); } while(0)
+
 UTEST_F_SETUP(String_Builder_Fixture) {
     utest_fixture->sb = string_builder_new();
 
     EXPECT_NE(utest_fixture->sb.str, NULL);
     ASSERT_EQ(utest_fixture->sb.count, 0);
+    ASSERT_ZERO_TERMINATION(utest_fixture->sb);
 }
 
 UTEST_F_TEARDOWN(String_Builder_Fixture) {
-    EXPECT_LE(utest_fixture->sb.count, utest_fixture->sb.capacity);
+    ASSERT_ZERO_TERMINATION(utest_fixture->sb);
     string_builder_destroy(utest_fixture->sb);
 }
 
@@ -25,15 +28,29 @@ UTEST_F(String_Builder_Fixture, append) {
 
     ASSERT_EQ(utest_fixture->sb.count, 1);
     ASSERT_EQ(utest_fixture->sb.str[0], c);
+    ASSERT_ZERO_TERMINATION(utest_fixture->sb);
 }
 
 UTEST_F(String_Builder_Fixture, append_str) {
     char *str = "test";
     string_builder_append_str(&utest_fixture->sb, str);
-    ASSERT_EQ(utest_fixture->sb.count, strlen(str));
 
-    string_builder_append(&utest_fixture->sb, '\0');
+    ASSERT_ZERO_TERMINATION(utest_fixture->sb);
+    ASSERT_EQ(utest_fixture->sb.count, strlen(str));
     ASSERT_STREQ(utest_fixture->sb.str, str);
+}
+
+UTEST_F(String_Builder_Fixture, string_builder_printf) {
+    char *format = "test %d %s\t";
+    const size_t buffer_count = 16;
+    char buffer[buffer_count];
+    int n1 = sprintf(buffer, format, 42, "moin");
+    assert(n1 < buffer_count);
+
+    int n2 = string_builder_printf(&utest_fixture->sb, format, 42, "moin");
+    ASSERT_EQ(n1, n2);
+    ASSERT_ZERO_TERMINATION(utest_fixture->sb);
+    ASSERT_STREQ(buffer, utest_fixture->sb.str);
 }
 
 struct Task_Const_Fixture {
