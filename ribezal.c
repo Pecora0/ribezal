@@ -130,14 +130,52 @@ CHECK_PRINTF_FMT(2, 3) int string_builder_printf(String_Builder *sb, char *forma
 }
 
 CHECK_PRINTF_FMT(2, 3) int string_builder_appendf(String_Builder *sb, char *format, ...) {
-    UNUSED(sb);
-    UNUSED(format);
-    UNIMPLEMENTED("string_builder_appendf");
+    va_list args;
+    va_start(args, format);
+    int n = vsnprintf(NULL, 0, format, args);
+    va_end(args);
+    assert(n >= 0);
+
+    while (sb->count + n + 1 > sb->capacity) string_builder_grow(sb);
+
+    va_start(args, format);
+    n = vsnprintf(sb->str + sb->count, n+1, format, args);
+    va_end(args);
+
+    assert(n >= 0);
+    sb->count += n;
+    return n;
 }
 
-char *percent_encode(char *text) {
-    UNUSED(text);
-    UNIMPLEMENTED("percent_encode");
+// see https://en.wikipedia.org/wiki/Percent-encoding
+bool is_reserved(char c) {
+    UNIMPLEMENTED("is_reserved");
+}
+
+bool is_unreserverd(char c) {
+    if ('a' <= c && c <= 'z') return true;
+    if ('A' <= c && c <= 'Z') return true;
+    if ('0' <= c && c <= '9') return true;
+    if (c == '-') return true;
+    if (c == '_') return true;
+    if (c == '~') return true;
+    if (c == '.') return true;
+    return false;
+}
+
+void percent_encode(String_Builder *sb, char *in) {
+    for (;*in != '\0'; in++) {
+        char c = *in;
+        if (is_unreserverd(c)) {
+            string_builder_append(sb, c);
+        } else if (c == ' ') {
+            string_builder_append_str(sb, "%20");
+        } else if (is_reserved(c)) {
+            UNIMPLEMENTED("percent_encode");
+        } else {
+            UNIMPLEMENTED("percent_encode");
+        }
+    }
 }
 
 #define THUMBS_UP_SERIALIZED "[ { \"type\": \"emoji\", \"emoji\" : \"\U0001f44d\" } ]"
@@ -156,22 +194,32 @@ void build_url(String_Builder *sb, Tg_Method_Call *call) {
             break;
         case SEND_MESSAGE:
             {
+                String_Builder temp = string_builder_new();
+                percent_encode(&temp, call->text);
+
                 string_builder_append_str(sb, "sendMessage");
                 string_builder_append(sb, '?');
-                string_builder_appendf(sb, "char_id=%ld", call->chat_id);
+                string_builder_appendf(sb, "chat_id=%ld", call->chat_id);
                 string_builder_append(sb, '&');
-                string_builder_appendf(sb, "text=%s", percent_encode(call->text));
+                string_builder_appendf(sb, "text=%s", temp.str);
+
+                string_builder_destroy(temp);
                 break;
             }
         case SET_MESSAGE_REACTION:
             {
+                String_Builder temp = string_builder_new();
+                percent_encode(&temp, THUMBS_UP_SERIALIZED);
+
                 string_builder_append_str(sb, "setMessageReaction");
                 string_builder_append(sb, '?');
                 string_builder_appendf(sb, "chat_id=%ld", call->chat_id);
                 string_builder_append(sb, '&');
                 string_builder_appendf(sb, "message_id=%d", call->message_id);
                 string_builder_append(sb, '&');
-                string_builder_appendf(sb, "reaction=%s", percent_encode(THUMBS_UP_SERIALIZED));
+                string_builder_appendf(sb, "reaction=%s", temp.str);
+
+                string_builder_destroy(temp);
                 break;
             }
     };

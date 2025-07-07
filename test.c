@@ -53,6 +53,21 @@ UTEST_F(String_Builder_Fixture, string_builder_printf) {
     ASSERT_STREQ(buffer, utest_fixture->sb.str);
 }
 
+UTEST_F(String_Builder_Fixture, string_builder_appendf) {
+    char *format = "test %d %s\t";
+    const size_t buffer_count = 32;
+    char buffer[buffer_count];
+    int n1 = sprintf(buffer,      format, 42, "moin");
+    n1    += sprintf(buffer + n1, format, 10, "hallo");
+    assert(n1 < buffer_count);
+
+    int n2 = string_builder_appendf(&utest_fixture->sb, format, 42, "moin");
+    n2    += string_builder_appendf(&utest_fixture->sb, format, 10, "hallo");
+    ASSERT_EQ(n1, n2);
+    ASSERT_ZERO_TERMINATION(utest_fixture->sb);
+    ASSERT_STREQ(buffer, utest_fixture->sb.str);
+}
+
 struct Task_Const_Fixture {
     Context ctx;
     String_Builder sb;
@@ -141,7 +156,7 @@ UTEST_F_SETUP(Build_URL_Fixture) {
 
 UTEST_F_TEARDOWN(Build_URL_Fixture) {
     build_url(&utest_fixture->sb, &utest_fixture->call);
-    ASSERT_STREQ(utest_fixture->sb.str, utest_fixture->expectation);
+    ASSERT_STREQ(utest_fixture->expectation, utest_fixture->sb.str);
 }
 
 UTEST_F(Build_URL_Fixture, getMe) {
@@ -152,6 +167,14 @@ UTEST_F(Build_URL_Fixture, getMe) {
 UTEST_F(Build_URL_Fixture, getUpdates) {
     utest_fixture->call = new_tg_api_call_get_updates(BOT_TOKEN);
     utest_fixture->expectation = URL_PREFIX BOT_TOKEN "/getUpdates";
+}
+
+UTEST_F(Build_URL_Fixture, sendMessage) {
+    Tg_Chat chat = {
+        .id = 420,
+    };
+    utest_fixture->call = new_tg_api_call_send_message(BOT_TOKEN, &chat, "Lorem ipsum");
+    utest_fixture->expectation = URL_PREFIX BOT_TOKEN "/sendMessage?chat_id=420&text=Lorem\%20ipsum";
 }
 
 UTEST(stack, int) {
