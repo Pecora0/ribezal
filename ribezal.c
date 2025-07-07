@@ -149,6 +149,7 @@ CHECK_PRINTF_FMT(2, 3) int string_builder_appendf(String_Builder *sb, char *form
 
 // see https://en.wikipedia.org/wiki/Percent-encoding
 bool is_reserved(char c) {
+    UNUSED(c);
     UNIMPLEMENTED("is_reserved");
 }
 
@@ -426,6 +427,13 @@ Context context_new() {
     return c;
 }
 
+bool context_is_empty(Context *c) {
+    for (size_t i=0; i<CONTEXT_KIND_COUNT; i++) {
+        if (c->flag[i]) return false;
+    }
+    return true;
+}
+
 void context_add_string_builder(Context *c, String_Builder *sb) {
     c->flag[CONTEXT_KIND_STRING_BUILDER] = true;
     c->string_builder = sb;
@@ -461,6 +469,22 @@ void context_remove_curl_global(Context *c) {
     c->flag[CONTEXT_KIND_CURL_GLOBAL] = false;
 }
 
+void context_add_curl_multi(Context *c) {
+    c->multi_handle = curl_multi_init();
+    if (c->multi_handle == NULL) {
+        UNIMPLEMENTED("context_add_curl_multi");
+    }
+    c->flag[CONTEXT_KIND_CURL_MULTI] = true;
+}
+
+void context_remove_curl_multi(Context *c) {
+    CURLMcode code = curl_multi_cleanup(c->multi_handle);
+    if (code != CURLM_OK) {
+        UNIMPLEMENTED("context_remove_curl_multi");
+    }
+    c->flag[CONTEXT_KIND_CURL_MULTI] = false;
+}
+
 void context_add_curl_easy(Context *c) {
     c->flag[CONTEXT_KIND_CURL_EASY] = true;
     c->easy_handle = curl_easy_init();
@@ -470,53 +494,6 @@ void context_add_curl_easy(Context *c) {
 void context_remove_curl_easy(Context *c) {
     curl_easy_cleanup(c->easy_handle);
     c->flag[CONTEXT_KIND_CURL_EASY] = false;
-}
-
-void context_merge(Context *this, Context other) {
-    for (Context_Kind i=0; i<CONTEXT_KIND_COUNT; i++) {
-        if (other.flag[i]) {
-            if (this->flag[i]) {
-                UNIMPLEMENTED("context_merge: conflict between contexts");
-            } else {
-                UNIMPLEMENTED("context_merge");
-            }
-        }
-    }
-    //UNIMPLEMENTED("context_merge");
-    //if (other.flag[CONTEXT_KIND_STRING_BUILDER]) {
-    //    if (this->flag[CONTEXT_KIND_STRING_BUILDER]) {
-    //        UNIMPLEMENTED("context_add");
-    //    } else {
-    //        this->flag[CONTEXT_KIND_STRING_BUILDER] = true;
-    //        this->string_builder = other.string_builder;
-    //    }
-    //}
-    //if (other.flag[CONTEXT_KIND_CURL_GLOBAL]) {
-    //    if (this->flag[CONTEXT_KIND_CURL_GLOBAL]) {
-    //        UNIMPLEMENTED("context_add");
-    //    } else {
-    //        this->flag[CONTEXT_KIND_CURL_GLOBAL] = true;
-    //    }
-    //}
-    //if (other.flag[CONTEXT_KIND_CURL_MULTI]) {
-    //    UNIMPLEMENTED("context_add");
-    //}
-    //if (other.flag[CONTEXT_KIND_CURL_EASY]) {
-    //    if (this->flag[CONTEXT_KIND_CURL_EASY]) {
-    //        UNIMPLEMENTED("context_add");
-    //    } else {
-    //        this->flag[CONTEXT_KIND_CURL_EASY] = true;
-    //        this->easy_handle = other.easy_handle;
-    //    }
-    //}
-    //if (other.flag[CONTEXT_KIND_FIFO]) {
-    //    if (this->flag[CONTEXT_KIND_FIFO]) {
-    //        UNIMPLEMENTED("context_add");
-    //    } else {
-    //        this->flag[CONTEXT_KIND_FIFO] = true;
-    //        this->file_descriptor = other.file_descriptor;
-    //    }
-    //}
 }
 
 typedef enum {
@@ -696,6 +673,15 @@ Task *task_curl_easy_context(Task *body) {
     return t;
 }
 
+Task *task_curl_multi_context(Task *body) {
+    Task *t = task_alloc();
+    t->kind = TASK_KIND_CONTEXT;
+    t->context_kind = CONTEXT_KIND_CURL_MULTI;
+    t->context_is_init = false;
+    t->context_body = body;
+    return t;
+}
+
 Task *task_curl_global_context(Task *body) {
     Task *t = task_alloc();
     t->kind = TASK_KIND_CONTEXT;
@@ -733,6 +719,15 @@ Task *task_string_builder_this() {
     return t;
 }
 
+Task *task_curl_easy_with_url(char *url) {
+    return task_string_builder_context(
+            task_curl_easy_context(
+                task_then(task_string_builder_this(), task_curl_perform)
+                ), 
+            url
+            );
+}
+
 typedef enum {
     REPLY_CLOSE,
     REPLY_ACK,
@@ -765,16 +760,7 @@ Reply_Kind command_execute(Command c) {
         case REQUEST:
             if (stack_string()) {
                 char *url = stack[stack_count-1].str;
-                task_par_append(runner, 
-                        task_curl_global_context(
-                            task_string_builder_context(
-                                task_curl_easy_context(
-                                    task_then(task_string_builder_this(), task_curl_perform)
-                                    ), 
-                                url
-                                )
-                            )
-                        );
+                task_par_append(runner, task_curl_multi_context(task_curl_easy_with_url(url)));
                 stack_drop();
                 return REPLY_ACK;
             }
@@ -888,7 +874,7 @@ void task_destroy(Task *t) {
         case TASK_KIND_SEQUENCE:
             break;
         case TASK_KIND_PARALLEL:
-            UNIMPLEMENTED("task_destroy");
+            break;
         case TASK_KIND_THEN:
             break;
         case TASK_KIND_ITERATE:
@@ -939,7 +925,11 @@ Result task_poll(Task *t, Context *ctx) {
         case TASK_KIND_PARALLEL:
             {
                 if (t->par_count == 0) return RESULT_DONE;
-                context_merge(t->sub_ctx + t->par_index, *ctx);
+                Context *sub_ctx = t->sub_ctx + t->par_index;
+                if (context_is_empty(sub_ctx)) {
+                    // each subtask needs a copy of the context in case it will layer more context on top
+                    *sub_ctx = *ctx;
+                }
                 Result r = task_poll(t->par[t->par_index], t->sub_ctx + t->par_index);
                 switch (r.state) {
                     case STATE_ERROR:
@@ -1132,35 +1122,54 @@ Result task_poll(Task *t, Context *ctx) {
                     {
                         assert(ctx->flag[CONTEXT_KIND_CURL_GLOBAL]);
                         if (!t->context_is_init) {
-                            ctx->multi_handle = curl_multi_init();
-                            if (ctx->multi_handle == NULL) {
-                                UNIMPLEMENTED("task_poll");
-                            }
                             t->context_is_init = true;
-                            ctx->flag[CONTEXT_KIND_CURL_MULTI] = true;
+                            context_add_curl_multi(ctx);
                         }
                         assert(ctx->multi_handle != NULL);
                         Result r = task_poll(t->context_body, ctx);
                         switch (r.state) {
+                            case STATE_ERROR:
                             case STATE_DONE:
                                 task_destroy(t->context_body);
-                                CURLMcode code = curl_multi_cleanup(ctx->multi_handle);
-                                if (code != CURLM_OK) {
-                                    UNIMPLEMENTED("task_poll");
-                                }
-                                ctx->flag[CONTEXT_KIND_CURL_MULTI] = false;
+                                context_remove_curl_multi(ctx);
+                                // CURLMcode code = curl_multi_cleanup(ctx->multi_handle);
+                                // if (code != CURLM_OK) {
+                                //     UNIMPLEMENTED("task_poll");
+                                // }
+                                // ctx->flag[CONTEXT_KIND_CURL_MULTI] = false;
                                 break;
                             case STATE_PENDING:
-                                UNIMPLEMENTED("task_poll");
-                            case STATE_ERROR:
-                                UNIMPLEMENTED("task_poll");
+                                break;
                         }
                         return r;
                     }
                 case CONTEXT_KIND_CURL_EASY:
                     assert(ctx->flag[CONTEXT_KIND_CURL_GLOBAL]);
                     if (ctx->flag[CONTEXT_KIND_CURL_MULTI]) {
-                        UNIMPLEMENTED("task_poll");
+                        if (!t->context_is_init) {
+                            t->context_is_init = true;
+                            context_add_curl_easy(ctx);
+                            CURLMcode code = curl_multi_add_handle(ctx->multi_handle, ctx->easy_handle);
+                            if (code != CURLM_OK) {
+                                UNIMPLEMENTED("task_poll");
+                            }
+                        }
+                        assert(t->context_body != NULL);
+                        Result r = task_poll(t->context_body, ctx);
+                        switch (r.state) {
+                            case STATE_ERROR:
+                            case STATE_DONE:
+                                task_destroy(t->context_body);
+                                CURLMcode code = curl_multi_remove_handle(ctx->multi_handle, ctx->easy_handle);
+                                if (code != CURLM_OK) {
+                                    UNIMPLEMENTED("task_poll");
+                                }
+                                context_remove_curl_easy(ctx);
+                                break;
+                            case STATE_PENDING:
+                                break;
+                        }
+                        return r;
                     } else {
                         if (!t->context_is_init) {
                             t->context_is_init = true;
@@ -1196,10 +1205,27 @@ Result task_poll(Task *t, Context *ctx) {
                 printf("[ERROR] failed curl_easy_setopt: %s\n", curl_easy_strerror(code));
                 return RESULT_ERROR;
             }
-            code = curl_easy_perform(ctx->easy_handle);
-            if (code != CURLE_OK) {
-                printf("[ERROR] failed curl_easy_perform to url '%s': %s\n", t->url, curl_easy_strerror(code));
-                return RESULT_ERROR;
+            if (ctx->flag[CONTEXT_KIND_CURL_MULTI]) {
+                int running_handles;
+                CURLMcode mcode = curl_multi_perform(ctx->multi_handle, &running_handles);
+                if (mcode != CURLM_OK) {
+                    UNIMPLEMENTED("task_poll");
+                }
+                int msgs_left;
+                CURLMsg *msg = curl_multi_info_read(ctx->multi_handle, &msgs_left);
+                if (msg == NULL) {
+                    assert(running_handles >= 1);
+                    return RESULT_PENDING;
+                } else {
+                    assert(msg->msg == CURLMSG_DONE);
+                    assert(msg->easy_handle == ctx->easy_handle);
+                }
+            } else {
+                code = curl_easy_perform(ctx->easy_handle);
+                if (code != CURLE_OK) {
+                    printf("[ERROR] failed curl_easy_perform to url '%s': %s\n", t->url, curl_easy_strerror(code));
+                    return RESULT_ERROR;
+                }
             }
             fflush(stdout); // to make sure we can see the data
             return RESULT_DONE;
@@ -1312,6 +1338,7 @@ int main() {
 
     // runner is a global task of kind PARALLEL that all can acces
     runner = task_parallel();
+    Task *runner_ctx = task_curl_global_context(runner);
 
     // /*
     Task *fifo = task_file_context(repl());
@@ -1346,9 +1373,9 @@ int main() {
     Context ctx = context_new();
 
     printf("[INFO] starting server\n");
-    Result r = task_poll(runner, &ctx);
+    Result r = task_poll(runner_ctx, &ctx);
     while (r.state != STATE_DONE) {
-        r = task_poll(runner, &ctx);
+        r = task_poll(runner_ctx, &ctx);
     }
     printf("[INFO] finishing server\n");
     

@@ -1,6 +1,7 @@
 all: build/ribezal README.md
 
 run: build/ribezal
+	rm -f input-fifo
 	./build/ribezal &
 
 test: build/test

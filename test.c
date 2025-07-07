@@ -68,6 +68,11 @@ UTEST_F(String_Builder_Fixture, string_builder_appendf) {
     ASSERT_STREQ(buffer, utest_fixture->sb.str);
 }
 
+UTEST(Context, context_new) {
+    Context ctx = context_new();
+    ASSERT_TRUE(context_is_empty(&ctx));
+}
+
 struct Task_Const_Fixture {
     Context ctx;
     String_Builder sb;
