@@ -70,27 +70,38 @@ UTEST_F_TEARDOWN(Task_Const_Fixture) {
     Task *t = task_const(pre);
     Result post = task_poll(t, &utest_fixture->ctx);
 
-    ASSERT_EQ(pre.state, STATE_DONE);
-    ASSERT_EQ(post.state, STATE_DONE);
-    ASSERT_EQ(pre.kind, post.kind);
-    switch (pre.kind) {
-        case RESULT_KIND_VOID:
+    ASSERT_EQ(pre.state, post.state);
+    switch (pre.state) {
+        case STATE_DONE:
+            ASSERT_EQ(pre.kind, post.kind);
+            switch (pre.kind) {
+                case RESULT_KIND_VOID:
+                    break;
+                case RESULT_KIND_BOOL:
+                    ASSERT_EQ(pre.bool_val, post.bool_val);
+                    break;
+                case RESULT_KIND_INT:
+                    ASSERT_EQ(pre.x, post.x);
+                    break;
+                case RESULT_KIND_INT_TUPLE:
+                    ASSERT_EQ(pre.x, post.x);
+                    ASSERT_EQ(pre.y, post.y);
+                    break;
+                case RESULT_KIND_STRING:
+                    ASSERT_EQ(pre.string, post.string);
+                    ASSERT_STREQ(pre.string->str, post.string->str);
+                    break;
+            }
             break;
-        case RESULT_KIND_BOOL:
-            ASSERT_EQ(pre.bool_val, post.bool_val);
-            break;
-        case RESULT_KIND_INT:
-            ASSERT_EQ(pre.x, post.x);
-            break;
-        case RESULT_KIND_INT_TUPLE:
-            ASSERT_EQ(pre.x, post.x);
-            ASSERT_EQ(pre.y, post.y);
-            break;
-        case RESULT_KIND_STRING:
-            ASSERT_EQ(pre.string, post.string);
-            ASSERT_STREQ(pre.string->str, post.string->str);
+        case STATE_PENDING:
+            ASSERT_TRUE(false);
+        case STATE_ERROR:
             break;
     }
+}
+
+UTEST_F(Task_Const_Fixture, STATE_ERROR) {
+    utest_fixture->pre = RESULT_ERROR;
 }
 
 UTEST_F(Task_Const_Fixture, RESULT_KIND_VOID) {
