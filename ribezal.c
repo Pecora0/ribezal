@@ -575,8 +575,6 @@ struct Task {
         // TASK_KIND_CONTEXT
         struct {
             Context_Kind context_kind;
-            // TODO: do we even need this flag? We have a flag in the Context struct which tells us wether we are in the context
-            bool context_is_init;
             Task *context_body;
             // Only used if context_kind == CONTEXT_KIND_STRING_BUILDER
             String_Builder context_sb;
@@ -668,7 +666,6 @@ Task *task_file_context(Task *body) {
     Task *t = task_alloc();
     t->kind = TASK_KIND_CONTEXT;
     t->context_kind = CONTEXT_KIND_FIFO;
-    t->context_is_init = false;
     t->context_body = body;
     return t;
 }
@@ -677,7 +674,6 @@ Task *task_curl_easy_context(Task *body) {
     Task *t = task_alloc();
     t->kind = TASK_KIND_CONTEXT;
     t->context_kind = CONTEXT_KIND_CURL_EASY;
-    t->context_is_init = false;
     t->context_body = body;
     return t;
 }
@@ -686,7 +682,6 @@ Task *task_curl_multi_context(Task *body) {
     Task *t = task_alloc();
     t->kind = TASK_KIND_CONTEXT;
     t->context_kind = CONTEXT_KIND_CURL_MULTI;
-    t->context_is_init = false;
     t->context_body = body;
     return t;
 }
@@ -695,7 +690,6 @@ Task *task_curl_global_context(Task *body) {
     Task *t = task_alloc();
     t->kind = TASK_KIND_CONTEXT;
     t->context_kind = CONTEXT_KIND_CURL_GLOBAL;
-    t->context_is_init = false;
     t->context_body = body;
     return t;
 }
@@ -715,7 +709,6 @@ Task *task_string_builder_context(Task *body, const char *str) {
     t->kind = TASK_KIND_CONTEXT;
     t->context_kind = CONTEXT_KIND_STRING_BUILDER;
     t->context_body = body;
-    t->context_is_init = false;
     t->context_sb = string_builder_new();
     string_builder_append_str(&t->context_sb, str);
     string_builder_append(&t->context_sb, '\0');
@@ -1080,9 +1073,7 @@ Result task_poll(Task *t, Context *ctx) {
             switch (t->context_kind) {
                 case CONTEXT_KIND_STRING_BUILDER:
                     {
-                        if (!t->context_is_init) {
-                            assert(!ctx->flag[CONTEXT_KIND_STRING_BUILDER]);
-                            t->context_is_init = true;
+                        if (!ctx->flag[CONTEXT_KIND_STRING_BUILDER]) {
                             context_add_string_builder(ctx, &t->context_sb);
                         }
                         assert(ctx->string_builder != NULL);
@@ -1101,9 +1092,7 @@ Result task_poll(Task *t, Context *ctx) {
                         return r;
                     }
                 case CONTEXT_KIND_FIFO:
-                    if (!t->context_is_init) {
-                        assert(!ctx->flag[CONTEXT_KIND_FIFO]);
-                        t->context_is_init = true;
+                    if (!ctx->flag[CONTEXT_KIND_FIFO]) {
                         context_add_fifo(ctx);
                         if (ctx->file_descriptor < 0) return RESULT_ERROR;
                         printf("[INFO] opened fifo successfully\n");
@@ -1123,8 +1112,7 @@ Result task_poll(Task *t, Context *ctx) {
                     return ret;
                 case CONTEXT_KIND_CURL_GLOBAL:
                     {
-                        if (!t->context_is_init) {
-                            t->context_is_init = true;
+                        if (!ctx->flag[CONTEXT_KIND_CURL_GLOBAL]) {
                             context_add_curl_global(ctx);
                         }
                         Result r = task_poll(t->context_body, ctx);
@@ -1142,8 +1130,7 @@ Result task_poll(Task *t, Context *ctx) {
                 case CONTEXT_KIND_CURL_MULTI:
                     {
                         assert(ctx->flag[CONTEXT_KIND_CURL_GLOBAL]);
-                        if (!t->context_is_init) {
-                            t->context_is_init = true;
+                        if (!ctx->flag[CONTEXT_KIND_CURL_MULTI]) {
                             context_add_curl_multi(ctx);
                         }
                         assert(ctx->multi_handle != NULL);
@@ -1167,8 +1154,7 @@ Result task_poll(Task *t, Context *ctx) {
                 case CONTEXT_KIND_CURL_EASY:
                     assert(ctx->flag[CONTEXT_KIND_CURL_GLOBAL]);
                     if (ctx->flag[CONTEXT_KIND_CURL_MULTI]) {
-                        if (!t->context_is_init) {
-                            t->context_is_init = true;
+                        if (!ctx->flag[CONTEXT_KIND_CURL_EASY]) {
                             context_add_curl_easy(ctx);
                             CURLMcode code = curl_multi_add_handle(ctx->multi_handle, ctx->easy_handle);
                             if (code != CURLM_OK) {
@@ -1192,8 +1178,7 @@ Result task_poll(Task *t, Context *ctx) {
                         }
                         return r;
                     } else {
-                        if (!t->context_is_init) {
-                            t->context_is_init = true;
+                        if (!ctx->flag[CONTEXT_KIND_CURL_EASY]) {
                             context_add_curl_easy(ctx);
                         }
                         assert(t->context_body != NULL);
