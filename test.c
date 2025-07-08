@@ -40,6 +40,24 @@ UTEST_F(String_Builder_Fixture, append_str) {
     ASSERT_STREQ(utest_fixture->sb.str, str);
 }
 
+UTEST_F(String_Builder_Fixture, append_str_n) {
+    char *str = "test";
+    size_t n = strlen(str);
+    string_builder_append_str_n(&utest_fixture->sb, str, n);
+
+    ASSERT_ZERO_TERMINATION(utest_fixture->sb);
+    ASSERT_EQ(utest_fixture->sb.count, strlen(str));
+    ASSERT_STREQ(utest_fixture->sb.str, str);
+}
+
+UTEST_F(String_Builder_Fixture, clear) {
+    string_builder_append_str(&utest_fixture->sb, "fooBarBaz");
+    string_builder_clear(&utest_fixture->sb);
+
+    ASSERT_ZERO_TERMINATION(utest_fixture->sb);
+    ASSERT_EQ(utest_fixture->sb.count, strlen(""));
+}
+
 UTEST_F(String_Builder_Fixture, string_builder_printf) {
     char *format = "test %d %s\t";
     const size_t buffer_count = 16;

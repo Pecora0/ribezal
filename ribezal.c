@@ -52,8 +52,9 @@ void reset_color() {
 }
 
 #define STRING_BUILDER_INITIAL_CAPACITY 16
-#define STRING_BUILDER_MAXIMUM_CAPACITY 1024
+#define STRING_BUILDER_MAXIMUM_CAPACITY 16000
 
+// TODO: Consider removing all these string_builder utility functions and using fmemopen, open_memstream, etc instead
 typedef struct {
     char *str;
     size_t capacity;
@@ -76,6 +77,7 @@ void string_builder_destroy(String_Builder sb) {
 
 void string_builder_clear(String_Builder *sb) {
     sb->count = 0;
+    sb->str[0] = '\0';
 }
 
 void string_builder_grow(String_Builder *sb) {
@@ -109,6 +111,13 @@ void string_builder_append_str(String_Builder *sb, const char *str) {
         string_builder_append(sb, *str);
         str++;
     }
+}
+
+void string_builder_append_str_n(String_Builder *sb, const char *str, size_t n) {
+    while (sb->count + n >= sb->capacity) string_builder_grow(sb);
+    memcpy(sb->str + sb->count, str, n);
+    sb->count += n;
+    sb->str[sb->count] = '\0';
 }
 
 CHECK_PRINTF_FMT(2, 3) int string_builder_printf(String_Builder *sb, char *format, ...) {
@@ -720,12 +729,15 @@ Task *task_string_builder_this() {
 }
 
 Task *task_curl_easy_with_url(char *url) {
-    return task_string_builder_context(
-            task_curl_easy_context(
-                task_then(task_string_builder_this(), task_curl_perform)
-                ), 
-            url
-            );
+    return task_curl_easy_context( 
+            task_string_builder_context( 
+                task_then(
+                    task_then(task_string_builder_this(), task_curl_perform),
+                    task_log
+                    ),
+                url
+                )
+            ); 
 }
 
 typedef enum {
@@ -897,6 +909,15 @@ void task_destroy(Task *t) {
     if (task_in_pool(t)) task_free(t);
 }
 
+size_t curl_write_cb(char *ptr, size_t size, size_t nmemb, void *userdata) {
+    size_t real_size = size * nmemb;
+
+    String_Builder *sb = (String_Builder *) userdata;
+    string_builder_append_str_n(sb, ptr, real_size);
+
+    return real_size;
+}
+
 Result task_poll(Task *t, Context *ctx) {
     assert(t != NULL);
     switch (t->kind) {
@@ -970,7 +991,7 @@ Result task_poll(Task *t, Context *ctx) {
                 case STATE_PENDING:
                     break;
                 case STATE_ERROR:
-                    return r;
+                    break;
             }
             return r;
         case TASK_KIND_ITERATE:
@@ -1205,6 +1226,18 @@ Result task_poll(Task *t, Context *ctx) {
                 printf("[ERROR] failed curl_easy_setopt: %s\n", curl_easy_strerror(code));
                 return RESULT_ERROR;
             }
+            code = curl_easy_setopt(ctx->easy_handle, CURLOPT_WRITEFUNCTION, curl_write_cb);
+            if (code != CURLE_OK) {
+                printf("[ERROR] failed curl_easy_setopt: %s\n", curl_easy_strerror(code));
+                return RESULT_ERROR;
+            }
+            // curl keeps its own copy of the url so we can clear the String_Builder and use it for something else
+            string_builder_clear(ctx->string_builder);
+            code = curl_easy_setopt(ctx->easy_handle, CURLOPT_WRITEDATA, ctx->string_builder);
+            if (code != CURLE_OK) {
+                printf("[ERROR] failed curl_easy_setopt: %s\n", curl_easy_strerror(code));
+                return RESULT_ERROR;
+            }
             if (ctx->flag[CONTEXT_KIND_CURL_MULTI]) {
                 int running_handles;
                 CURLMcode mcode = curl_multi_perform(ctx->multi_handle, &running_handles);
@@ -1223,12 +1256,11 @@ Result task_poll(Task *t, Context *ctx) {
             } else {
                 code = curl_easy_perform(ctx->easy_handle);
                 if (code != CURLE_OK) {
-                    printf("[ERROR] failed curl_easy_perform to url '%s': %s\n", t->url, curl_easy_strerror(code));
+                    printf("[ERROR] failed curl_easy_perform: %s\n", curl_easy_strerror(code));
                     return RESULT_ERROR;
                 }
             }
-            fflush(stdout); // to make sure we can see the data
-            return RESULT_DONE;
+            return result_string(ctx->string_builder);
         case TASK_KIND_COUNTER_STRING:
             assert(ctx->flag[CONTEXT_KIND_STRING_BUILDER]);
             string_builder_clear(ctx->string_builder);
