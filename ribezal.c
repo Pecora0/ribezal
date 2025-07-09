@@ -18,6 +18,7 @@
 
 // thirdparty
 #include <curl/curl.h>
+#include "thirdparty/json.h"
 
 typedef enum {
     WHITE,
@@ -52,7 +53,7 @@ void reset_color() {
 }
 
 #define STRING_BUILDER_INITIAL_CAPACITY 16
-#define STRING_BUILDER_MAXIMUM_CAPACITY 16000
+#define STRING_BUILDER_MAXIMUM_CAPACITY 2048
 
 // TODO: Consider removing all these string_builder utility functions and using fmemopen, open_memstream, etc instead
 typedef struct {
@@ -409,6 +410,7 @@ Result result_string(String_Builder *sb) {
 typedef enum {
     CONTEXT_KIND_STRING_BUILDER,
     CONTEXT_KIND_FIFO,
+    CONTEXT_KIND_JSON_VALUE,
     CONTEXT_KIND_CURL_GLOBAL,
     CONTEXT_KIND_CURL_MULTI,
     CONTEXT_KIND_CURL_EASY,
@@ -418,6 +420,7 @@ typedef enum {
 typedef struct {
     bool flag[CONTEXT_KIND_COUNT];
     String_Builder *string_builder;
+    json_value_t *json_value;
     CURLM *multi_handle;
     CURL *easy_handle;
     int file_descriptor;
@@ -505,6 +508,16 @@ void context_remove_curl_easy(Context *c) {
     c->flag[CONTEXT_KIND_CURL_EASY] = false;
 }
 
+void context_add_json_value(Context *c) {
+    c->json_value = NULL;
+    c->flag[CONTEXT_KIND_JSON_VALUE] = true;
+}
+
+void context_remove_json_value(Context *c) {
+    free(c->json_value);
+    c->flag[CONTEXT_KIND_JSON_VALUE] = false;
+}
+
 typedef enum {
     TASK_KIND_CONST,
     TASK_KIND_SEQUENCE,
@@ -517,6 +530,7 @@ typedef enum {
     TASK_KIND_CONTEXT,
     TASK_KIND_STRING_BUILDER_THIS,
     TASK_KIND_CURL_PERFORM,
+    TASK_KIND_PARSE_JSON_VALUE,
     TASK_KIND_COUNTER_STRING,
 } Task_Kind;
 
@@ -587,6 +601,10 @@ struct Task {
         struct {
             int counter_string_x;
         };
+        // TASK_KIND_PARSE_JSON_VALUE
+        struct {
+            String_Builder *json_source_str;
+        };
     };
 };
 
@@ -633,6 +651,13 @@ void task_free(Task *t) {
     Task_Free_Node *tfree = (Task_Free_Node *) t;
     tfree->next = task_pool_head;
     task_pool_head = tfree;
+}
+
+Task *task_const(Result r) {
+    Task *ret = task_alloc();
+    ret->kind = TASK_KIND_CONST;
+    ret->const_result = r;
+    return ret;
 }
 
 Task *task_log(Result r) {
@@ -704,7 +729,25 @@ Task *task_curl_perform(Result r) {
     return t;
 }
 
-Task *task_string_builder_context(Task *body, const char *str) {
+Task *task_parse_json_value(Result r) {
+    assert(r.state == STATE_DONE);
+    assert(r.kind == RESULT_KIND_STRING);
+
+    Task *t = task_alloc();
+    t->kind = TASK_KIND_PARSE_JSON_VALUE;
+    t->json_source_str = r.string;
+    return t;
+}
+
+Task *task_context_json_value(Task *body) {
+    Task *t = task_alloc();
+    t->kind = TASK_KIND_CONTEXT;
+    t->context_kind = CONTEXT_KIND_JSON_VALUE;
+    t->context_body = body;
+    return t;
+}
+
+Task *task_context_string_builder(Task *body, const char *str) {
     Task *t = task_alloc();
     t->kind = TASK_KIND_CONTEXT;
     t->context_kind = CONTEXT_KIND_STRING_BUILDER;
@@ -723,11 +766,13 @@ Task *task_string_builder_this() {
 
 Task *task_curl_easy_with_url(char *url) {
     return task_curl_easy_context( 
-            task_string_builder_context( 
-                task_then(
-                    task_then(task_string_builder_this(), task_curl_perform),
-                    task_log
-                    ),
+            task_context_string_builder( 
+                task_context_json_value(
+                    task_then(
+                        task_then(task_string_builder_this(), task_curl_perform),
+                        task_parse_json_value
+                        )
+                ),
                 url
                 )
             ); 
@@ -873,32 +918,6 @@ Reply_Kind execute(char *prog) {
 char read_buf[READ_BUF_CAPACITY];
 
 void task_destroy(Task *t) {
-    switch (t->kind) {
-        case TASK_KIND_CONST:
-            break;
-        case TASK_KIND_SEQUENCE:
-            break;
-        case TASK_KIND_PARALLEL:
-            break;
-        case TASK_KIND_THEN:
-            break;
-        case TASK_KIND_ITERATE:
-            break;
-        case TASK_KIND_WAIT:
-            break;
-        case TASK_KIND_LOG:
-            break;
-        case TASK_KIND_FIFO_REPL:
-            break;
-        case TASK_KIND_CONTEXT:
-            break;
-        case TASK_KIND_STRING_BUILDER_THIS:
-            break;
-        case TASK_KIND_CURL_PERFORM:
-            break;
-        case TASK_KIND_COUNTER_STRING:
-            break;
-    }
     if (task_in_pool(t)) task_free(t);
 }
 
@@ -1071,6 +1090,25 @@ Result task_poll(Task *t, Context *ctx) {
             }
         case TASK_KIND_CONTEXT:
             switch (t->context_kind) {
+                case CONTEXT_KIND_JSON_VALUE:
+                    {
+                        if (!ctx->flag[CONTEXT_KIND_JSON_VALUE]) {
+                            context_add_json_value(ctx);
+                        }
+                        assert(t->context_body != NULL);
+                        Result r = task_poll(t->context_body, ctx);
+                        switch (r.state) {
+                            case STATE_ERROR:
+                            case STATE_DONE:
+                                task_destroy(t->context_body);
+                                t->context_body = NULL;
+                                context_remove_json_value(ctx);
+                                break;
+                            case STATE_PENDING:
+                                break;
+                        }
+                        return r;
+                    }
                 case CONTEXT_KIND_STRING_BUILDER:
                     {
                         if (!ctx->flag[CONTEXT_KIND_STRING_BUILDER]) {
@@ -1140,11 +1178,6 @@ Result task_poll(Task *t, Context *ctx) {
                             case STATE_DONE:
                                 task_destroy(t->context_body);
                                 context_remove_curl_multi(ctx);
-                                // CURLMcode code = curl_multi_cleanup(ctx->multi_handle);
-                                // if (code != CURLM_OK) {
-                                //     UNIMPLEMENTED("task_poll");
-                                // }
-                                // ctx->flag[CONTEXT_KIND_CURL_MULTI] = false;
                                 break;
                             case STATE_PENDING:
                                 break;
@@ -1251,15 +1284,20 @@ Result task_poll(Task *t, Context *ctx) {
             string_builder_clear(ctx->string_builder);
             string_builder_printf(ctx->string_builder, "Counter: %d, String_Builder: %p", t->counter_string_x, ctx->string_builder);
             return result_string(ctx->string_builder);
+        case TASK_KIND_PARSE_JSON_VALUE:
+            assert(ctx->flag[CONTEXT_KIND_JSON_VALUE]);
+            if (ctx->json_value == NULL) {
+                ctx->json_value = json_parse(t->json_source_str->str, t->json_source_str->count);
+                if (ctx->json_value == NULL) {
+                    printf("[ERROR] Failed to parse json value\n");
+                    return RESULT_ERROR;
+                }
+                return RESULT_DONE;
+            } else {
+                UNIMPLEMENTED("task_poll");
+            }
     }
     UNREACHABLE("task_poll");
-}
-
-Task *task_const(Result r) {
-    Task *ret = task_alloc();
-    ret->kind = TASK_KIND_CONST;
-    ret->const_result = r;
-    return ret;
 }
 
 Task *task_wait(double dur) {
@@ -1337,7 +1375,7 @@ Task *counter_inc(Result r) {
 
     Task *ret = task_sequence();
 
-    Task *wrap = task_string_builder_context(counter_string(r.x), "");
+    Task *wrap = task_context_string_builder(counter_string(r.x), "");
     task_seq_append(ret, wrap);
     task_seq_append(ret, task_wait(1.0));
 
