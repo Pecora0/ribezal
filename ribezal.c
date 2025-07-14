@@ -925,6 +925,60 @@ Reply_Kind execute(char *prog) {
     return REPLY_ACK;
 }
 
+json_value_t *json_element_by_key(json_object_t *obj, const char *name) {
+    for (json_object_element_t *elem = obj->start; elem != NULL; elem = elem->next) {
+        if (strncmp(name, elem->name->string, elem->name->string_size) == 0) {
+            return elem->value;
+        }
+    }
+    return NULL;
+}
+
+bool as_tg_message(json_value_t *value, Tg_Message *message) {
+    json_object_t *as_obj = json_value_as_object(value);
+    if (as_obj == NULL) return false;
+
+    UNUSED(message);
+    json_value_t *id_value = json_element_by_key(as_obj, "message_id");
+    if (id_value == NULL) return false;
+    json_number_t *id_number = json_value_as_number(id_value);
+    if (id_number == NULL) return false;
+    char *endptr;
+    message_id_t id = strtol(id_number->number, &endptr, 10);
+    assert(endptr[0] == '\0');
+    message->message_id = id;
+
+    UNIMPLEMENTED("extract field 'chat'");
+    UNIMPLEMENTED("extract field 'from'");
+    UNIMPLEMENTED("extract field 'text'");
+
+    return true;
+}
+
+bool as_tg_update(json_value_t *value, Tg_Update *update) {
+    json_object_t *as_obj = json_value_as_object(value);
+    if (as_obj == NULL) return false;
+
+    json_value_t *id_value = json_element_by_key(as_obj, "update_id");
+    if (id_value == NULL) return false;
+    json_number_t *id_number = json_value_as_number(id_value);
+    if (id_number == NULL) return false;
+    char *endptr;
+    update_id_t id = strtol(id_number->number, &endptr, 10);
+    assert(endptr[0] == '\0');
+    update->update_id = id;
+
+    json_value_t *message_value = json_element_by_key(as_obj, "message");
+    // message is an optional field
+    if (message_value != NULL) {
+        // TODO: we need to allocate a Tg_Message struct, where du we do this
+        // We do NOT want to do a deep free at the end! -> maybe arena allocator?
+        UNIMPLEMENTED("as_tg_update");
+    }
+
+    return true;
+}
+
 // TODO: multiple read tasks can use this so every read task should have its own
 #define READ_BUF_CAPACITY 64
 char read_buf[READ_BUF_CAPACITY];
@@ -1314,12 +1368,31 @@ Result task_poll(Task *t, Context *ctx) {
                 UNIMPLEMENTED("task_poll");
             } else {
                 json_object_t *obj = json_value_as_object(ctx->json_value);
-                assert(obj != NULL);
-                printf("[INFO] Found JSON object with %zu elements\n", obj->length);
-                for (json_object_element_t *elem = obj->start; elem != NULL; elem = elem->next) {
-                    printf("[INFO] Element %s\n", elem->name->string);
+                if (obj == NULL) return RESULT_ERROR;
+                json_value_t *value_ok = json_element_by_key(obj, "ok");
+                if (value_ok == NULL) return RESULT_ERROR;
+                if (json_value_is_true(value_ok)) {
+                    json_value_t *value_result = json_element_by_key(obj, "result");
+                    if (value_result == NULL) return RESULT_ERROR;
+
+                    json_array_t *array_result = json_value_as_array(value_result);
+                    assert(array_result != NULL);
+                    for (json_array_element_t *elem = array_result->start; elem != NULL; elem = elem->next) {
+                        Tg_Update update = {0};
+                        if (as_tg_update(elem->value, &update)) {
+                            printf("[INFO] Update of id %d\n", update.update_id);
+                        } else {
+                            printf("[ERROR] Failed to interpret json value as Tg_Update\n");
+                            return RESULT_ERROR;
+                        }
+                    }
+                    return RESULT_DONE;
+                } else if (json_value_is_false(value_ok)) {
+                    UNIMPLEMENTED("task_poll");
+                } else {
+                    return RESULT_ERROR;
                 }
-                return RESULT_DONE;
+                return RESULT_ERROR;
             }
     }
     UNREACHABLE("task_poll");
