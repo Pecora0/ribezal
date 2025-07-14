@@ -531,6 +531,7 @@ typedef enum {
     TASK_KIND_STRING_BUILDER_THIS,
     TASK_KIND_CURL_PERFORM,
     TASK_KIND_PARSE_JSON_VALUE,
+    TASK_KIND_INSPECT_JSON_VALUE,
     TASK_KIND_COUNTER_STRING,
 } Task_Kind;
 
@@ -739,6 +740,14 @@ Task *task_parse_json_value(Result r) {
     return t;
 }
 
+Task *task_inspect_json_value(Result r) {
+    assert(r.state == STATE_DONE);
+
+    Task *t = task_alloc();
+    t->kind = TASK_KIND_INSPECT_JSON_VALUE;
+    return t;
+}
+
 Task *task_context_json_value(Task *body) {
     Task *t = task_alloc();
     t->kind = TASK_KIND_CONTEXT;
@@ -769,8 +778,11 @@ Task *task_curl_easy_with_url(char *url) {
             task_context_string_builder( 
                 task_context_json_value(
                     task_then(
-                        task_then(task_string_builder_this(), task_curl_perform),
-                        task_parse_json_value
+                        task_then(
+                            task_then(task_string_builder_this(), task_curl_perform),
+                            task_parse_json_value
+                            ),
+                        task_inspect_json_value
                         )
                 ),
                 url
@@ -1295,6 +1307,19 @@ Result task_poll(Task *t, Context *ctx) {
                 return RESULT_DONE;
             } else {
                 UNIMPLEMENTED("task_poll");
+            }
+        case TASK_KIND_INSPECT_JSON_VALUE:
+            assert(ctx->flag[CONTEXT_KIND_JSON_VALUE]);
+            if (ctx->json_value == NULL) {
+                UNIMPLEMENTED("task_poll");
+            } else {
+                json_object_t *obj = json_value_as_object(ctx->json_value);
+                assert(obj != NULL);
+                printf("[INFO] Found JSON object with %zu elements\n", obj->length);
+                for (json_object_element_t *elem = obj->start; elem != NULL; elem = elem->next) {
+                    printf("[INFO] Element %s\n", elem->name->string);
+                }
+                return RESULT_DONE;
             }
     }
     UNREACHABLE("task_poll");
