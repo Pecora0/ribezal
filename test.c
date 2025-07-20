@@ -129,6 +129,9 @@ UTEST_F_TEARDOWN(Task_Const_Fixture) {
                     ASSERT_EQ(pre.string, post.string);
                     ASSERT_STREQ(pre.string->str, post.string->str);
                     break;
+                case RESULT_KIND_JSON_VALUE:
+                    ASSERT_EQ(pre.json_value, post.json_value);
+                    break;
             }
             break;
         case STATE_PENDING:
@@ -164,6 +167,12 @@ UTEST_F(Task_Const_Fixture, RESULT_KIND_STRING) {
     string_builder_append(&utest_fixture->sb, '\0');
 
     utest_fixture->pre = result_string(&utest_fixture->sb);
+}
+
+UTEST_F(Task_Const_Fixture, RESULT_KIND_JSON_VALUE) {
+    // We don't free this pointer...
+    // It's fine when tests leak memory - Right?
+    utest_fixture->pre = result_json_value(json_parse("[2, 3]", 6));
 }
 
 #define BOT_TOKEN "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"

@@ -364,6 +364,7 @@ typedef enum {
     RESULT_KIND_INT,
     RESULT_KIND_INT_TUPLE,
     RESULT_KIND_STRING,
+    RESULT_KIND_JSON_VALUE,
 } Result_Kind;
 
 typedef struct {
@@ -374,6 +375,7 @@ typedef struct {
     int x;
     int y;
     String_Builder *string;
+    json_value_t *json_value;
 } Result;
 
 #define RESULT_DONE    (Result) {.state = STATE_DONE,    .kind = RESULT_KIND_VOID}
@@ -409,10 +411,16 @@ Result result_string(String_Builder *sb) {
     return r;
 }
 
+Result result_json_value(json_value_t *val) {
+    Result r = RESULT_DONE;
+    r.kind = RESULT_KIND_JSON_VALUE;
+    r.json_value = val;
+    return r;
+}
+
 typedef enum {
     CONTEXT_KIND_STRING_BUILDER,
     CONTEXT_KIND_FIFO,
-    CONTEXT_KIND_JSON_VALUE,
     CONTEXT_KIND_ARENA,
     CONTEXT_KIND_CURL_GLOBAL,
     CONTEXT_KIND_CURL_MULTI,
@@ -424,7 +432,6 @@ typedef struct {
     bool flag[CONTEXT_KIND_COUNT];
     Arena arena;
     String_Builder *string_builder;
-    json_value_t *json_value;
     CURLM *multi_handle;
     CURL *easy_handle;
     int file_descriptor;
@@ -510,16 +517,6 @@ void context_add_curl_easy(Context *c) {
 void context_remove_curl_easy(Context *c) {
     curl_easy_cleanup(c->easy_handle);
     c->flag[CONTEXT_KIND_CURL_EASY] = false;
-}
-
-void context_add_json_value(Context *c) {
-    c->json_value = NULL;
-    c->flag[CONTEXT_KIND_JSON_VALUE] = true;
-}
-
-void context_remove_json_value(Context *c) {
-    free(c->json_value);
-    c->flag[CONTEXT_KIND_JSON_VALUE] = false;
 }
 
 void context_add_arena(Context *c) {
@@ -619,6 +616,10 @@ struct Task {
         // TASK_KIND_PARSE_JSON_VALUE
         struct {
             String_Builder *json_source_str;
+        };
+        // TASK_KIND_INSPECT_JSON_VALUE
+        struct {
+            json_value_t *json_root;
         };
     };
 };
@@ -756,17 +757,11 @@ Task *task_parse_json_value(Result r) {
 
 Task *task_inspect_json_value(Result r) {
     assert(r.state == STATE_DONE);
+    assert(r.kind == RESULT_KIND_JSON_VALUE);
 
     Task *t = task_alloc();
     t->kind = TASK_KIND_INSPECT_JSON_VALUE;
-    return t;
-}
-
-Task *task_context_json_value(Task *body) {
-    Task *t = task_alloc();
-    t->kind = TASK_KIND_CONTEXT;
-    t->context_kind = CONTEXT_KIND_JSON_VALUE;
-    t->context_body = body;
+    t->json_root = r.json_value;
     return t;
 }
 
@@ -799,14 +794,12 @@ Task *task_curl_easy_with_url(char *url) {
     return task_curl_easy_context( 
             task_context_arena(
                 task_context_string_builder( 
-                    task_context_json_value(
+                    task_then(
                         task_then(
-                            task_then(
-                                task_then(task_string_builder_this(), task_curl_perform),
-                                task_parse_json_value
-                                ),
-                            task_inspect_json_value
-                            )
+                            task_then(task_string_builder_this(), task_curl_perform),
+                            task_parse_json_value
+                            ),
+                        task_inspect_json_value
                     ),
                     url
                     )
@@ -1020,6 +1013,10 @@ size_t curl_write_cb(char *ptr, size_t size, size_t nmemb, void *userdata) {
     return real_size;
 }
 
+void *json_parse_cb(void *arena, size_t size) {
+    return arena_alloc(arena, size);
+}
+
 Result task_poll(Task *t, Context *ctx) {
     assert(t != NULL);
     switch (t->kind) {
@@ -1191,25 +1188,6 @@ Result task_poll(Task *t, Context *ctx) {
                             case STATE_DONE:
                                 task_destroy(t->context_body);
                                 context_remove_arena(ctx);
-                                break;
-                            case STATE_PENDING:
-                                break;
-                        }
-                        return r;
-                    }
-                case CONTEXT_KIND_JSON_VALUE:
-                    {
-                        if (!ctx->flag[CONTEXT_KIND_JSON_VALUE]) {
-                            context_add_json_value(ctx);
-                        }
-                        assert(t->context_body != NULL);
-                        Result r = task_poll(t->context_body, ctx);
-                        switch (r.state) {
-                            case STATE_ERROR:
-                            case STATE_DONE:
-                                task_destroy(t->context_body);
-                                t->context_body = NULL;
-                                context_remove_json_value(ctx);
                                 break;
                             case STATE_PENDING:
                                 break;
@@ -1392,23 +1370,24 @@ Result task_poll(Task *t, Context *ctx) {
             string_builder_printf(ctx->string_builder, "Counter: %d, String_Builder: %p", t->counter_string_x, ctx->string_builder);
             return result_string(ctx->string_builder);
         case TASK_KIND_PARSE_JSON_VALUE:
-            assert(ctx->flag[CONTEXT_KIND_JSON_VALUE]);
-            if (ctx->json_value == NULL) {
-                ctx->json_value = json_parse(t->json_source_str->str, t->json_source_str->count);
-                if (ctx->json_value == NULL) {
-                    printf("[ERROR] Failed to parse json value\n");
-                    return RESULT_ERROR;
-                }
-                return RESULT_DONE;
-            } else {
-                UNIMPLEMENTED("task_poll");
+            assert(ctx->flag[CONTEXT_KIND_ARENA]);
+            json_value_t *root = json_parse_ex(
+                    t->json_source_str->str, t->json_source_str->count, 
+                    json_parse_flags_default, 
+                    json_parse_cb, 
+                    &ctx->arena, 
+                    NULL
+                    );
+            if (root == NULL) {
+                printf("[ERROR] Failed to parse json value\n");
+                return RESULT_ERROR;
             }
+            return result_json_value(root);
         case TASK_KIND_INSPECT_JSON_VALUE:
-            assert(ctx->flag[CONTEXT_KIND_JSON_VALUE]);
-            if (ctx->json_value == NULL) {
+            if (t->json_root == NULL) {
                 UNIMPLEMENTED("task_poll");
             } else {
-                json_object_t *obj = json_value_as_object(ctx->json_value);
+                json_object_t *obj = json_value_as_object(t->json_root);
                 if (obj == NULL) return RESULT_ERROR;
                 json_value_t *value_ok = json_element_by_key(obj, "ok");
                 if (value_ok == NULL) return RESULT_ERROR;
@@ -1416,17 +1395,25 @@ Result task_poll(Task *t, Context *ctx) {
                     json_value_t *value_result = json_element_by_key(obj, "result");
                     if (value_result == NULL) return RESULT_ERROR;
 
-                    json_array_t *array_result = json_value_as_array(value_result);
-                    assert(array_result != NULL);
-                    for (json_array_element_t *elem = array_result->start; elem != NULL; elem = elem->next) {
-                        Tg_Update update = {0};
-                        if (as_tg_update(elem->value, &update)) {
-                            printf("[INFO] Update of id %d\n", update.update_id);
-                        } else {
-                            printf("[ERROR] Failed to interpret json value as Tg_Update\n");
-                            return RESULT_ERROR;
-                        }
-                    }
+                    json_object_t *object_result = json_value_as_object(value_result);
+                    assert(object_result != NULL);
+                    json_value_t *value_first_name = json_element_by_key(object_result, "first_name");
+                    if (value_first_name == NULL) return RESULT_ERROR;
+                    json_string_t *string_first_name = json_value_as_string(value_first_name);
+                    assert(string_first_name != NULL);
+                    printf("[INFO] getMe to bot named: '%s'\n", string_first_name->string);
+
+                    // json_array_t *array_result = json_value_as_array(value_result);
+                    // assert(array_result != NULL);
+                    // for (json_array_element_t *elem = array_result->start; elem != NULL; elem = elem->next) {
+                    //     Tg_Update update = {0};
+                    //     if (as_tg_update(elem->value, &update)) {
+                    //         printf("[INFO] Update of id %d\n", update.update_id);
+                    //     } else {
+                    //         printf("[ERROR] Failed to interpret json value as Tg_Update\n");
+                    //         return RESULT_ERROR;
+                    //     }
+                    // }
                     return RESULT_DONE;
                 } else if (json_value_is_false(value_ok)) {
                     UNIMPLEMENTED("task_poll");
