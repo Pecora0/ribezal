@@ -19,6 +19,8 @@
 // thirdparty
 #include <curl/curl.h>
 #include "thirdparty/json.h"
+#define ARENA_IMPLEMENTATION
+#include "thirdparty/arena.h"
 
 typedef enum {
     WHITE,
@@ -411,6 +413,7 @@ typedef enum {
     CONTEXT_KIND_STRING_BUILDER,
     CONTEXT_KIND_FIFO,
     CONTEXT_KIND_JSON_VALUE,
+    CONTEXT_KIND_ARENA,
     CONTEXT_KIND_CURL_GLOBAL,
     CONTEXT_KIND_CURL_MULTI,
     CONTEXT_KIND_CURL_EASY,
@@ -419,6 +422,7 @@ typedef enum {
 
 typedef struct {
     bool flag[CONTEXT_KIND_COUNT];
+    Arena arena;
     String_Builder *string_builder;
     json_value_t *json_value;
     CURLM *multi_handle;
@@ -516,6 +520,16 @@ void context_add_json_value(Context *c) {
 void context_remove_json_value(Context *c) {
     free(c->json_value);
     c->flag[CONTEXT_KIND_JSON_VALUE] = false;
+}
+
+void context_add_arena(Context *c) {
+    c->arena = (Arena) {0};
+    c->flag[CONTEXT_KIND_ARENA] = true;
+}
+
+void context_remove_arena(Context *c) {
+    arena_free(&c->arena);
+    c->flag[CONTEXT_KIND_ARENA] = false;
 }
 
 typedef enum {
@@ -773,19 +787,29 @@ Task *task_string_builder_this() {
     return t;
 }
 
+Task *task_context_arena(Task *body) {
+    Task *t = task_alloc();
+    t->kind = TASK_KIND_CONTEXT;
+    t->context_kind = CONTEXT_KIND_ARENA;
+    t->context_body = body;
+    return t;
+}
+
 Task *task_curl_easy_with_url(char *url) {
     return task_curl_easy_context( 
-            task_context_string_builder( 
-                task_context_json_value(
-                    task_then(
+            task_context_arena(
+                task_context_string_builder( 
+                    task_context_json_value(
                         task_then(
-                            task_then(task_string_builder_this(), task_curl_perform),
-                            task_parse_json_value
-                            ),
-                        task_inspect_json_value
-                        )
-                ),
-                url
+                            task_then(
+                                task_then(task_string_builder_this(), task_curl_perform),
+                                task_parse_json_value
+                                ),
+                            task_inspect_json_value
+                            )
+                    ),
+                    url
+                    )
                 )
             ); 
 }
@@ -1156,6 +1180,23 @@ Result task_poll(Task *t, Context *ctx) {
             }
         case TASK_KIND_CONTEXT:
             switch (t->context_kind) {
+                case CONTEXT_KIND_ARENA:
+                    {
+                        if (!ctx->flag[CONTEXT_KIND_ARENA]) {
+                            context_add_arena(ctx);
+                        }
+                        Result r = task_poll(t->context_body, ctx);
+                        switch (r.state) {
+                            case STATE_ERROR:
+                            case STATE_DONE:
+                                task_destroy(t->context_body);
+                                context_remove_arena(ctx);
+                                break;
+                            case STATE_PENDING:
+                                break;
+                        }
+                        return r;
+                    }
                 case CONTEXT_KIND_JSON_VALUE:
                     {
                         if (!ctx->flag[CONTEXT_KIND_JSON_VALUE]) {
