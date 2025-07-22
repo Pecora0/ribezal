@@ -37,6 +37,11 @@ typedef struct {
     size_t count;
 } String_Builder;
 
+typedef struct {
+    char *str;
+    size_t count;
+} String_View;
+
 typedef enum {
     STACK_VALUE_STRING,
     STACK_VALUE_INT,
@@ -66,7 +71,7 @@ typedef enum {
     RESULT_KIND_VOID,
     RESULT_KIND_BOOL,
     RESULT_KIND_INT,
-    RESULT_KIND_STRING,
+    RESULT_KIND_STRING_VIEW,
     RESULT_KIND_JSON_VALUE,
 } Result_Kind;
 
@@ -76,7 +81,7 @@ typedef struct {
     // possible values
     bool bool_val;
     int x;
-    String_Builder *string;
+    String_View string_view;
     json_value_t *json_value;
 } Result;
 
@@ -176,11 +181,11 @@ struct Task {
         };
         // TASK_KIND_CURL_PERFORM
         struct {
-            char *url;
+            String_View url;
         };
         // TASK_KIND_PARSE_JSON_VALUE
         struct {
-            String_Builder *json_source_str;
+            String_View json_source_str;
         };
         // TASK_KIND_INSPECT_JSON_VALUE
         struct {
@@ -305,6 +310,14 @@ CHECK_PRINTF_FMT(2, 3) int string_builder_appendf(String_Builder *sb, char *form
     assert(n >= 0);
     sb->count += n;
     return n;
+}
+
+String_View string_view_from_string_builder(String_Builder sb) {
+    String_View result = {
+        .str = sb.str,
+        .count = sb.count,
+    };
+    return result;
 }
 
 // see https://en.wikipedia.org/wiki/Percent-encoding
@@ -507,10 +520,10 @@ Result result_int(int x) {
     return r;
 }
 
-Result result_string(String_Builder *sb) {
+Result result_string_view(String_View sv) {
     Result r = RESULT_DONE;
-    r.kind = RESULT_KIND_STRING;
-    r.string = sb;
+    r.kind = RESULT_KIND_STRING_VIEW;
+    r.string_view = sv;
     return r;
 }
 
@@ -570,7 +583,7 @@ bool context_remove_fifo(Context *c) {
 void context_add_curl_global(Context *c) {
     CURLcode r = curl_global_init(CURL_GLOBAL_DEFAULT);
     if (r != 0) {
-        UNIMPLEMENTED("task_poll");
+        UNIMPLEMENTED("context_add_curl_global");
     }
     c->flag[CONTEXT_KIND_CURL_GLOBAL] = true;
 }
@@ -617,6 +630,10 @@ void context_remove_arena(Context *c) {
     c->flag[CONTEXT_KIND_ARENA] = false;
 }
 
+/******************************
+ * task_*                     *
+ ******************************/
+
 void task_free_all() {
     task_pool_head = NULL;
     for (size_t i=0; i<TASK_POOL_CAPACITY; i++) {
@@ -626,10 +643,6 @@ void task_free_all() {
     }
     assert(task_pool_head != NULL);
 }
-
-/******************************
- * task_*                     *
- ******************************/
 
 bool task_in_pool(Task *t) {
     return task_pool <= t && t < task_pool + TASK_POOL_CAPACITY;
@@ -662,12 +675,13 @@ Task *task_const(Result r) {
     return ret;
 }
 
+// TODO: do we need this task kind?
 Task *task_log(Result r) {
     assert(r.state == STATE_DONE);
-    assert(r.kind == RESULT_KIND_STRING);
+    assert(r.kind == RESULT_KIND_STRING_VIEW);
     Task *ret = task_alloc();
     ret->kind = TASK_KIND_LOG;
-    ret->log_msg = r.string;
+    UNIMPLEMENTED("task_log");
     return ret;
 }
 
@@ -723,21 +737,21 @@ Task *task_curl_global_context(Task *body) {
 
 Task *task_curl_perform(Result r) {
     assert(r.state == STATE_DONE);
-    assert(r.kind == RESULT_KIND_STRING);
+    assert(r.kind == RESULT_KIND_STRING_VIEW);
 
     Task *t = task_alloc();
     t->kind = TASK_KIND_CURL_PERFORM;
-    t->url = r.string->str;
+    t->url = r.string_view;
     return t;
 }
 
 Task *task_parse_json_value(Result r) {
     assert(r.state == STATE_DONE);
-    assert(r.kind == RESULT_KIND_STRING);
+    assert(r.kind == RESULT_KIND_STRING_VIEW);
 
     Task *t = task_alloc();
     t->kind = TASK_KIND_PARSE_JSON_VALUE;
-    t->json_source_str = r.string;
+    t->json_source_str = r.string_view;
     return t;
 }
 
@@ -1300,14 +1314,14 @@ Result task_poll(Task *t, Context *ctx) {
             UNREACHABLE("no valid Context_Kind");
         case TASK_KIND_STRING_BUILDER_THIS:
             assert(ctx->flag[CONTEXT_KIND_STRING_BUILDER]);
-            return result_string(ctx->string_builder);
+            return result_string_view(string_view_from_string_builder(*ctx->string_builder));
         case TASK_KIND_CURL_PERFORM:
             assert(ctx->flag[CONTEXT_KIND_CURL_EASY]);
             CURLcode code;
-            assert(t->url != NULL);
+            assert(t->url.str != NULL);
             code = curl_easy_setopt(ctx->easy_handle, CURLOPT_URL, t->url);
             if (code != CURLE_OK) {
-                printf("[ERROR] tried to set url '%s'\n", t->url);
+                printf("[ERROR] tried to set url '%*s'\n", (int) t->url.count, t->url.str);
                 printf("[ERROR] failed curl_easy_setopt: %s\n", curl_easy_strerror(code));
                 return RESULT_ERROR;
             }
@@ -1345,11 +1359,11 @@ Result task_poll(Task *t, Context *ctx) {
                     return RESULT_ERROR;
                 }
             }
-            return result_string(ctx->string_builder);
+            return result_string_view(string_view_from_string_builder(*ctx->string_builder));
         case TASK_KIND_PARSE_JSON_VALUE:
             assert(ctx->flag[CONTEXT_KIND_ARENA]);
             json_value_t *root = json_parse_ex(
-                    t->json_source_str->str, t->json_source_str->count, 
+                    t->json_source_str.str, t->json_source_str.count, 
                     json_parse_flags_default, 
                     json_parse_cb, 
                     &ctx->arena, 

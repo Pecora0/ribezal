@@ -121,9 +121,8 @@ UTEST_F_TEARDOWN(Task_Const_Fixture) {
                 case RESULT_KIND_INT:
                     ASSERT_EQ(pre.x, post.x);
                     break;
-                case RESULT_KIND_STRING:
-                    ASSERT_EQ(pre.string, post.string);
-                    ASSERT_STREQ(pre.string->str, post.string->str);
+                case RESULT_KIND_STRING_VIEW:
+                    ASSERT_TRUE(false);
                     break;
                 case RESULT_KIND_JSON_VALUE:
                     ASSERT_EQ(pre.json_value, post.json_value);
@@ -151,14 +150,6 @@ UTEST_F(Task_Const_Fixture, RESULT_KIND_BOOL) {
 
 UTEST_F(Task_Const_Fixture, RESULT_KIND_INT) {
     utest_fixture->pre = result_int(42);
-}
-
-UTEST_F(Task_Const_Fixture, RESULT_KIND_STRING) {
-    utest_fixture->sb = string_builder_new();
-    string_builder_append_str(&utest_fixture->sb, "moin");
-    string_builder_append(&utest_fixture->sb, '\0');
-
-    utest_fixture->pre = result_string(&utest_fixture->sb);
 }
 
 UTEST_F(Task_Const_Fixture, RESULT_KIND_JSON_VALUE) {
