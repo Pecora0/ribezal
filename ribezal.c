@@ -29,14 +29,8 @@
  * type definitions     *
  ************************/
 
-// TODO: Consider removing all these string_builder utility functions and using fmemopen, open_memstream, etc instead
-// TODO: or just remove this thing entirely and use the functionality from arena.h
-typedef struct {
-    char *str;
-    size_t capacity;
-    size_t count;
-} String_Builder;
-
+// I have the pointer to the Arena in there so that I can pass it conveniently to callback functions (namely curl_write_cb)
+// It is "standalone" but it may be confusing. Is there another possibility?
 typedef struct {
     Arena *arena;
     char *items;
@@ -168,7 +162,7 @@ struct Task {
         };
         // TASK_KIND_LOG
         struct {
-            String_Builder *log_msg;
+            String_View log_msg;
         };
         // TASK_KIND_WAIT
         struct {
@@ -218,117 +212,18 @@ typedef enum {
  * functions                  *
  ******************************/
 
-/******************************
- * string_builder_*           *
- ******************************/
-
-String_Builder string_builder_new() {
-    String_Builder sb;
-    sb.count = 0;
-    sb.capacity = STRING_BUILDER_INITIAL_CAPACITY;
-    sb.str = malloc(sizeof(char) * sb.capacity);
-    sb.str[0] = '\0';
-    return sb;
-}
-
-void string_builder_destroy(String_Builder sb) {
-    free(sb.str);
-    sb.str = NULL;
-}
-
-void string_builder_clear(String_Builder *sb) {
-    sb->count = 0;
-    sb->str[0] = '\0';
-}
-
-void string_builder_grow(String_Builder *sb) {
-    size_t new_capacity = 2*sb->capacity;
-    assert(new_capacity <= STRING_BUILDER_MAXIMUM_CAPACITY);
-    sb->str = realloc(sb->str, new_capacity * sizeof(char));
-    if (sb->str == NULL) {
-        UNIMPLEMENTED("string_builder_grow");
-    }
-    sb->capacity = new_capacity;
-}
-
-void string_builder_append(String_Builder *sb, char c) {
-    while (sb->count >= sb->capacity + 1) string_builder_grow(sb);
-    sb->str[sb->count] = c;
-    sb->count++;
-    sb->str[sb->count] = '\0';
-    return;
-}
-
-// TODO: I do not want to have this function. Every other string_builder_* function should take care to append a zero to the string.
-// I keep this for now to be sure but make it just an assertion.
-// Remove this when string_builder_appendf was implemented and tested.
-void string_builder_append_null(String_Builder *sb) {
-    assert(sb->count < sb->capacity);
-    assert(sb->str[sb->count] == '\0');
-}
-
-void string_builder_append_str(String_Builder *sb, const char *str) {
-    while (*str != '\0') {
-        string_builder_append(sb, *str);
-        str++;
-    }
-}
-
-void string_builder_append_str_n(String_Builder *sb, const char *str, size_t n) {
-    while (sb->count + n >= sb->capacity) string_builder_grow(sb);
-    memcpy(sb->str + sb->count, str, n);
-    sb->count += n;
-    sb->str[sb->count] = '\0';
-}
-
-CHECK_PRINTF_FMT(2, 3) int string_builder_printf(String_Builder *sb, char *format, ...) {
-    va_list args;
-    va_start(args, format);
-    int n = vsnprintf(NULL, 0, format, args);
-    va_end(args);
-    assert(n >= 0);
-
-    while ((size_t) n+1 > sb->capacity) string_builder_grow(sb);
-
-    va_start(args, format);
-    n = vsnprintf(sb->str, n+1, format, args);
-    va_end(args);
-
-    assert(n >= 0);
-    sb->count = n;
-    return n;
-}
-
-CHECK_PRINTF_FMT(2, 3) int string_builder_appendf(String_Builder *sb, char *format, ...) {
-    va_list args;
-    va_start(args, format);
-    int n = vsnprintf(NULL, 0, format, args);
-    va_end(args);
-    assert(n >= 0);
-
-    while (sb->count + n + 1 > sb->capacity) string_builder_grow(sb);
-
-    va_start(args, format);
-    n = vsnprintf(sb->str + sb->count, n+1, format, args);
-    va_end(args);
-
-    assert(n >= 0);
-    sb->count += n;
-    return n;
-}
-
-String_View string_view_from_string_builder(String_Builder sb) {
+String_View string_view_from_arena_string_builder(Arena_String_Builder sb) {
     String_View result = {
-        .str = sb.str,
+        .str = sb.items,
         .count = sb.count,
     };
     return result;
 }
 
-String_View string_view_from_arena_string_builder(Arena_String_Builder sb) {
+String_View string_view_from_char_ptr(char *ptr) {
     String_View result = {
-        .str = sb.items,
-        .count = sb.count,
+        .str = ptr,
+        .count = strlen(ptr),
     };
     return result;
 }
@@ -350,78 +245,86 @@ bool is_unreserverd(char c) {
     return false;
 }
 
-void percent_encode(String_Builder *sb, char *in) {
-    for (;*in != '\0'; in++) {
-        char c = *in;
+String_View percent_encode(Arena *a, String_View in) {
+    Arena_String_Builder sb = {0};
+    for (size_t i=0; i<in.count; i++) {
+        char c = in.str[i];
         if (is_unreserverd(c)) {
-            string_builder_append(sb, c);
+            arena_da_append(a, &sb, c);
         } else if (c == ' ') {
-            string_builder_append_str(sb, "%20");
+            arena_sb_append_cstr(a, &sb, "%20");
         } else if (is_reserved(c)) {
             UNIMPLEMENTED("percent_encode");
         } else {
             UNIMPLEMENTED("percent_encode");
         }
     }
+    return string_view_from_arena_string_builder(sb);
 }
 
 #define THUMBS_UP_SERIALIZED "[ { \"type\": \"emoji\", \"emoji\" : \"\U0001f44d\" } ]"
 
-void build_url(String_Builder *sb, Tg_Method_Call *call) {
-    string_builder_append_str(sb, URL_PREFIX);
-    string_builder_append_str(sb, call->bot_token);
-    string_builder_append_str(sb, "/");
+String_View build_url(Arena *a, Tg_Method_Call *call) {
+    Arena_String_Builder sb = {0};
+    arena_sb_append_cstr(a, &sb, URL_PREFIX);
+    arena_sb_append_cstr(a, &sb, call->bot_token);
+    arena_sb_append_cstr(a, &sb, "/");
 
     switch (call->method) {
         case GET_ME:
-            string_builder_append_str(sb, "getMe");
+            arena_sb_append_cstr(a, &sb, "getMe");
             break;
         case GET_UPDATES:
-            string_builder_append_str(sb, "getUpdates");
+            arena_sb_append_cstr(a, &sb, "getUpdates");
             break;
         case SEND_MESSAGE:
             {
-                String_Builder temp = string_builder_new();
-                percent_encode(&temp, call->text);
+                Arena temp = {0};
+                String_View text_enc = percent_encode(&temp, string_view_from_char_ptr(call->text));
 
-                string_builder_append_str(sb, "sendMessage");
-                string_builder_append(sb, '?');
-                string_builder_appendf(sb, "chat_id=%ld", call->chat_id);
-                string_builder_append(sb, '&');
-                string_builder_appendf(sb, "text=%s", temp.str);
+                arena_sb_append_cstr(a, &sb, "sendMessage");
+                arena_sb_append_cstr(a, &sb, "?");
+                char *chat_id_str = arena_sprintf(a, "chat_id=%ld", call->chat_id);
+                arena_sb_append_cstr(a, &sb, chat_id_str);
+                arena_sb_append_cstr(a, &sb, "&");
+                char *text_str = arena_sprintf(a, "text=%*s", (int) text_enc.count, text_enc.str);
+                arena_sb_append_cstr(a, &sb, text_str);
 
-                string_builder_destroy(temp);
+                arena_free(&temp);
                 break;
             }
         case SET_MESSAGE_REACTION:
             {
-                String_Builder temp = string_builder_new();
-                percent_encode(&temp, THUMBS_UP_SERIALIZED);
+                Arena temp = {0};
+                String_View emoji_enc = percent_encode(&temp, string_view_from_char_ptr(THUMBS_UP_SERIALIZED));
 
-                string_builder_append_str(sb, "setMessageReaction");
-                string_builder_append(sb, '?');
-                string_builder_appendf(sb, "chat_id=%ld", call->chat_id);
-                string_builder_append(sb, '&');
-                string_builder_appendf(sb, "message_id=%d", call->message_id);
-                string_builder_append(sb, '&');
-                string_builder_appendf(sb, "reaction=%s", temp.str);
+                arena_sb_append_cstr(a, &sb, "setMessageReaction");
+                arena_sb_append_cstr(a, &sb, "?");
+                char *chat_id_str = arena_sprintf(a, "chat_id=%ld", call->chat_id);
+                arena_sb_append_cstr(a, &sb, chat_id_str);
+                arena_sb_append_cstr(a, &sb, "&");
+                char *message_id_str = arena_sprintf(a, "message_id=%d", call->message_id);
+                arena_sb_append_cstr(a, &sb, message_id_str);
+                arena_sb_append_cstr(a, &sb, "&");
+                char *reaction_str = arena_sprintf(a, "reaction=%*s", (int) emoji_enc.count, emoji_enc.str);
+                arena_sb_append_cstr(a, &sb, reaction_str);
 
-                string_builder_destroy(temp);
+                arena_free(&temp);
                 break;
             }
     };
-    string_builder_append_null(sb);
+    return string_view_from_arena_string_builder(sb);
 }
 
 /******************************
  * stack_*                    *
  ******************************/
 
-void stack_push_string(char *str) {
-    size_t l = strlen(str);
+void stack_push_string(String_View sv) {
+    size_t l = sv.count;
     char *dest = malloc((l+1)*sizeof(char));
-    strcpy(dest, str);
-    assert(dest[l] == '\0');
+    strncpy(dest, sv.str, l);
+    dest[l] = '\0';
 
     assert(stack_count < MAX_STACK_SIZE);
     stack[stack_count].kind = STACK_VALUE_STRING;
@@ -836,25 +739,23 @@ Reply_Kind command_execute(Command c) {
             return REPLY_ERROR;
         case TG_GETME:
             if (stack_string()) {
-                String_Builder temp = string_builder_new();
+                Arena temp = {0};
                 Tg_Method_Call call = new_tg_api_call_get_me(STACK_TOP.str);
-                build_url(&temp, &call);
+                String_View url = build_url(&temp, &call);
                 stack_drop();
-                string_builder_append_null(&temp);
-                stack_push_string(temp.str);
-                string_builder_destroy(temp);
+                stack_push_string(url);
+                arena_free(&temp);
                 return REPLY_ACK;
             }
             return REPLY_ERROR;
         case TG_GETUPDATES:
             if (stack_string()) {
-                String_Builder temp = string_builder_new();
+                Arena temp = {0};
                 Tg_Method_Call call = new_tg_api_call_get_updates(STACK_TOP.str);
-                build_url(&temp, &call);
+                String_View url = build_url(&temp, &call);
                 stack_drop();
-                string_builder_append_null(&temp);
-                stack_push_string(temp.str);
-                string_builder_destroy(temp);
+                stack_push_string(url);
+                arena_free(&temp);
                 return REPLY_ACK;
             }
             return REPLY_ERROR;
@@ -924,7 +825,7 @@ Reply_Kind execute(char *prog) {
                     }
                 }
             }
-            if (!matched) stack_push_string(token);
+            if (!matched) stack_push_string(string_view_from_char_ptr(token));
         } else {
             return REPLY_ERROR;
         }
@@ -999,7 +900,6 @@ size_t curl_write_cb(char *ptr, size_t size, size_t nmemb, void *userdata) {
 
     Arena_String_Builder *sb = (Arena_String_Builder *) userdata;
     arena_da_append_many(sb->arena, sb, ptr, real_size);
-    //string_builder_append_str_n(sb, ptr, real_size);
 
     return real_size;
 }
@@ -1136,8 +1036,7 @@ Result task_poll(Task *t, Context *ctx) {
             if (difftime(now, t->start) >= t->duration) return RESULT_DONE;
             return RESULT_PENDING;
         case TASK_KIND_LOG:
-            string_builder_append(t->log_msg, '\0');
-            printf("[LOG] %s\n", t->log_msg->str);
+            printf("[LOG] %*s\n", (int) t->log_msg.count, t->log_msg.str);
             return RESULT_DONE;
         case TASK_KIND_FIFO_REPL:
             {

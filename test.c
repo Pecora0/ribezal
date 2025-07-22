@@ -3,89 +3,6 @@
 #define TEST
 #include "ribezal.c"
 
-struct String_Builder_Fixture {
-    String_Builder sb;
-};
-
-#define ASSERT_ZERO_TERMINATION(sb) do { ASSERT_LT((sb).count, (sb).capacity); ASSERT_EQ('\0', (sb).str[(sb).count]); } while(0)
-
-UTEST_F_SETUP(String_Builder_Fixture) {
-    utest_fixture->sb = string_builder_new();
-
-    EXPECT_NE(utest_fixture->sb.str, NULL);
-    ASSERT_EQ(utest_fixture->sb.count, 0);
-    ASSERT_ZERO_TERMINATION(utest_fixture->sb);
-}
-
-UTEST_F_TEARDOWN(String_Builder_Fixture) {
-    ASSERT_ZERO_TERMINATION(utest_fixture->sb);
-    string_builder_destroy(utest_fixture->sb);
-}
-
-UTEST_F(String_Builder_Fixture, append) {
-    char c = 'a';
-    string_builder_append(&utest_fixture->sb, c);
-
-    ASSERT_EQ(utest_fixture->sb.count, 1);
-    ASSERT_EQ(utest_fixture->sb.str[0], c);
-    ASSERT_ZERO_TERMINATION(utest_fixture->sb);
-}
-
-UTEST_F(String_Builder_Fixture, append_str) {
-    char *str = "test";
-    string_builder_append_str(&utest_fixture->sb, str);
-
-    ASSERT_ZERO_TERMINATION(utest_fixture->sb);
-    ASSERT_EQ(utest_fixture->sb.count, strlen(str));
-    ASSERT_STREQ(utest_fixture->sb.str, str);
-}
-
-UTEST_F(String_Builder_Fixture, append_str_n) {
-    char *str = "test";
-    size_t n = strlen(str);
-    string_builder_append_str_n(&utest_fixture->sb, str, n);
-
-    ASSERT_ZERO_TERMINATION(utest_fixture->sb);
-    ASSERT_EQ(utest_fixture->sb.count, strlen(str));
-    ASSERT_STREQ(utest_fixture->sb.str, str);
-}
-
-UTEST_F(String_Builder_Fixture, clear) {
-    string_builder_append_str(&utest_fixture->sb, "fooBarBaz");
-    string_builder_clear(&utest_fixture->sb);
-
-    ASSERT_ZERO_TERMINATION(utest_fixture->sb);
-    ASSERT_EQ(utest_fixture->sb.count, strlen(""));
-}
-
-UTEST_F(String_Builder_Fixture, string_builder_printf) {
-    char *format = "test %d %s\t";
-    const size_t buffer_count = 16;
-    char buffer[buffer_count];
-    int n1 = sprintf(buffer, format, 42, "moin");
-    assert(n1 < buffer_count);
-
-    int n2 = string_builder_printf(&utest_fixture->sb, format, 42, "moin");
-    ASSERT_EQ(n1, n2);
-    ASSERT_ZERO_TERMINATION(utest_fixture->sb);
-    ASSERT_STREQ(buffer, utest_fixture->sb.str);
-}
-
-UTEST_F(String_Builder_Fixture, string_builder_appendf) {
-    char *format = "test %d %s\t";
-    const size_t buffer_count = 32;
-    char buffer[buffer_count];
-    int n1 = sprintf(buffer,      format, 42, "moin");
-    n1    += sprintf(buffer + n1, format, 10, "hallo");
-    assert(n1 < buffer_count);
-
-    int n2 = string_builder_appendf(&utest_fixture->sb, format, 42, "moin");
-    n2    += string_builder_appendf(&utest_fixture->sb, format, 10, "hallo");
-    ASSERT_EQ(n1, n2);
-    ASSERT_ZERO_TERMINATION(utest_fixture->sb);
-    ASSERT_STREQ(buffer, utest_fixture->sb.str);
-}
-
 UTEST(Context, context_new) {
     Context ctx = context_new();
     ASSERT_TRUE(context_is_empty(&ctx));
@@ -93,7 +10,6 @@ UTEST(Context, context_new) {
 
 struct Task_Const_Fixture {
     Context ctx;
-    String_Builder sb;
     Result pre;
 };
 
@@ -160,28 +76,30 @@ UTEST_F(Task_Const_Fixture, RESULT_KIND_JSON_VALUE) {
 
 #define BOT_TOKEN "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
 struct Build_URL_Fixture {
-    String_Builder sb;
+    Arena arena;
     Tg_Method_Call call;
-    char *expectation;
+    String_View expectation;
 };
 
 UTEST_F_SETUP(Build_URL_Fixture) {
-    utest_fixture->sb = string_builder_new();
+    utest_fixture->arena = (Arena) {0};
 }
 
 UTEST_F_TEARDOWN(Build_URL_Fixture) {
-    build_url(&utest_fixture->sb, &utest_fixture->call);
-    ASSERT_STREQ(utest_fixture->expectation, utest_fixture->sb.str);
+    String_View url = build_url(&utest_fixture->arena, &utest_fixture->call);
+    ASSERT_EQ(utest_fixture->expectation.count, url.count);
+    ASSERT_STRNEQ(utest_fixture->expectation.str, url.str, url.count);
+    arena_free(&utest_fixture->arena);
 }
 
 UTEST_F(Build_URL_Fixture, getMe) {
     utest_fixture->call = new_tg_api_call_get_me(BOT_TOKEN);
-    utest_fixture->expectation = URL_PREFIX BOT_TOKEN "/getMe";
+    utest_fixture->expectation = string_view_from_char_ptr(URL_PREFIX BOT_TOKEN "/getMe");
 }
 
 UTEST_F(Build_URL_Fixture, getUpdates) {
     utest_fixture->call = new_tg_api_call_get_updates(BOT_TOKEN);
-    utest_fixture->expectation = URL_PREFIX BOT_TOKEN "/getUpdates";
+    utest_fixture->expectation = string_view_from_char_ptr(URL_PREFIX BOT_TOKEN "/getUpdates");
 }
 
 UTEST_F(Build_URL_Fixture, sendMessage) {
@@ -189,7 +107,7 @@ UTEST_F(Build_URL_Fixture, sendMessage) {
         .id = 420,
     };
     utest_fixture->call = new_tg_api_call_send_message(BOT_TOKEN, &chat, "Lorem ipsum");
-    utest_fixture->expectation = URL_PREFIX BOT_TOKEN "/sendMessage?chat_id=420&text=Lorem\%20ipsum";
+    utest_fixture->expectation = string_view_from_char_ptr(URL_PREFIX BOT_TOKEN "/sendMessage?chat_id=420&text=Lorem\%20ipsum");
 }
 
 UTEST(stack, int) {
@@ -208,7 +126,7 @@ UTEST(stack, string) {
     char *str = "moin";
 
     size_t stack_count_pre = stack_count;
-    stack_push_string(str);
+    stack_push_string(string_view_from_char_ptr(str));
     ASSERT_EQ(stack_count, stack_count_pre+1);
     ASSERT_TRUE(stack_string());
     ASSERT_STREQ(str, STACK_TOP.str);
@@ -255,8 +173,8 @@ UTEST(execute, quit) {
 }
 
 UTEST(execute, drop) {
-    stack_push_string("hello");
-    stack_push_string("world");
+    stack_push_string(string_view_from_char_ptr("hello"));
+    stack_push_string(string_view_from_char_ptr("world"));
     stack_push_int(-8);
     size_t stack_count_pre = stack_count;
     Reply_Kind r = execute("drop");
@@ -346,13 +264,14 @@ Arithmetic_Case program_list[] = {
 #define PROGRAM_LIST_COUNT (sizeof(program_list) / sizeof(program_list[0]))
 
 UTEST(execute, arithmetic) {
-    String_Builder sb = string_builder_new();
+    Arena temp = {0};
+    Arena_String_Builder sb = {0};
     for (size_t i=0; i<PROGRAM_LIST_COUNT; i++) {
-        string_builder_clear(&sb);
-        string_builder_append_str(&sb, program_list[i].prog);
-        string_builder_append_null(&sb);
+        sb.count = 0;
+        arena_sb_append_cstr(&temp, &sb, program_list[i].prog);
+        arena_sb_append_null(&temp, &sb);
 
-        Reply_Kind r = execute(sb.str);
+        Reply_Kind r = execute(sb.items);
         ASSERT_EQ(r, REPLY_ACK);
         ASSERT_TRUE(stack_int());
         ASSERT_EQ(STACK_TOP.x, program_list[i].result);
