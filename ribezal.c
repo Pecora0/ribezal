@@ -38,6 +38,13 @@ typedef struct {
 } String_Builder;
 
 typedef struct {
+    Arena *arena;
+    char *items;
+    size_t capacity;
+    size_t count;
+} Arena_String_Builder;
+
+typedef struct {
     char *str;
     size_t count;
 } String_View;
@@ -86,7 +93,6 @@ typedef struct {
 } Result;
 
 typedef enum {
-    CONTEXT_KIND_STRING_BUILDER,
     CONTEXT_KIND_FIFO,
     CONTEXT_KIND_ARENA,
     CONTEXT_KIND_CURL_GLOBAL,
@@ -97,8 +103,7 @@ typedef enum {
 
 typedef struct {
     bool flag[CONTEXT_KIND_COUNT];
-    Arena arena;
-    String_Builder *string_builder;
+    Arena *arena;
     CURLM *multi_handle;
     CURL *easy_handle;
     int file_descriptor;
@@ -114,7 +119,6 @@ typedef enum {
     TASK_KIND_LOG,
     TASK_KIND_FIFO_REPL,
     TASK_KIND_CONTEXT,
-    TASK_KIND_STRING_BUILDER_THIS,
     TASK_KIND_CURL_PERFORM,
     TASK_KIND_PARSE_JSON_VALUE,
     TASK_KIND_INSPECT_JSON_VALUE,
@@ -176,12 +180,13 @@ struct Task {
         struct {
             Context_Kind context_kind;
             Task *context_body;
-            // Only used if context_kind == CONTEXT_KIND_STRING_BUILDER
-            String_Builder context_sb;
+            // Only used if context_kind == CONTEXT_KIND_ARENA
+            Arena context_arena;
         };
         // TASK_KIND_CURL_PERFORM
         struct {
             String_View url;
+            Arena_String_Builder curl_perform_sb;
         };
         // TASK_KIND_PARSE_JSON_VALUE
         struct {
@@ -315,6 +320,14 @@ CHECK_PRINTF_FMT(2, 3) int string_builder_appendf(String_Builder *sb, char *form
 String_View string_view_from_string_builder(String_Builder sb) {
     String_View result = {
         .str = sb.str,
+        .count = sb.count,
+    };
+    return result;
+}
+
+String_View string_view_from_arena_string_builder(Arena_String_Builder sb) {
+    String_View result = {
+        .str = sb.items,
         .count = sb.count,
     };
     return result;
@@ -540,9 +553,9 @@ Result result_json_value(json_value_t *val) {
 
 Context context_new() {
     Context c = {
-        .string_builder = NULL,
         .multi_handle = NULL,
         .easy_handle = NULL,
+        .arena = NULL,
         .file_descriptor = -1,
     };
     for (size_t i=0; i<CONTEXT_KIND_COUNT; i++) {
@@ -556,17 +569,6 @@ bool context_is_empty(Context *c) {
         if (c->flag[i]) return false;
     }
     return true;
-}
-
-void context_add_string_builder(Context *c, String_Builder *sb) {
-    c->flag[CONTEXT_KIND_STRING_BUILDER] = true;
-    c->string_builder = sb;
-}
-
-void context_remove_string_builder(Context *c) {
-    string_builder_destroy(*c->string_builder);
-    c->string_builder = NULL;
-    c->flag[CONTEXT_KIND_STRING_BUILDER] = false;
 }
 
 void context_add_fifo(Context *c) {
@@ -620,13 +622,14 @@ void context_remove_curl_easy(Context *c) {
     c->flag[CONTEXT_KIND_CURL_EASY] = false;
 }
 
-void context_add_arena(Context *c) {
-    c->arena = (Arena) {0};
+void context_add_arena(Context *c, Arena *a) {
+    assert(a != NULL);
+    c->arena = a;
     c->flag[CONTEXT_KIND_ARENA] = true;
 }
 
 void context_remove_arena(Context *c) {
-    arena_free(&c->arena);
+    arena_free(c->arena);
     c->flag[CONTEXT_KIND_ARENA] = false;
 }
 
@@ -742,6 +745,7 @@ Task *task_curl_perform(Result r) {
     Task *t = task_alloc();
     t->kind = TASK_KIND_CURL_PERFORM;
     t->url = r.string_view;
+    t->curl_perform_sb = (Arena_String_Builder) {0};
     return t;
 }
 
@@ -765,44 +769,34 @@ Task *task_inspect_json_value(Result r) {
     return t;
 }
 
-Task *task_context_string_builder(Task *body, const char *str) {
-    Task *t = task_alloc();
-    t->kind = TASK_KIND_CONTEXT;
-    t->context_kind = CONTEXT_KIND_STRING_BUILDER;
-    t->context_body = body;
-    t->context_sb = string_builder_new();
-    string_builder_append_str(&t->context_sb, str);
-    string_builder_append(&t->context_sb, '\0');
-    return t;
-}
-
-Task *task_string_builder_this() {
-    Task *t = task_alloc();
-    t->kind = TASK_KIND_STRING_BUILDER_THIS;
-    return t;
-}
-
-Task *task_context_arena(Task *body) {
+Task *task_context_arena(Task *body, Arena arena) {
     Task *t = task_alloc();
     t->kind = TASK_KIND_CONTEXT;
     t->context_kind = CONTEXT_KIND_ARENA;
     t->context_body = body;
+
+    t->context_arena = arena;
+
     return t;
 }
 
+// TODO: this function name is crap
 Task *task_curl_easy_with_url(char *url) {
+    Arena a = {0};
+    String_View url_view = {
+        .str = arena_strdup(&a, url),
+        .count = strlen(url),
+    };
     return task_curl_easy_context( 
             task_context_arena(
-                task_context_string_builder( 
+                task_then(
                     task_then(
-                        task_then(
-                            task_then(task_string_builder_this(), task_curl_perform),
-                            task_parse_json_value
-                            ),
-                        task_inspect_json_value
-                    ),
-                    url
-                    )
+                        task_then(task_const(result_string_view(url_view)), task_curl_perform),
+                        task_parse_json_value
+                        ),
+                    task_inspect_json_value
+                ),
+                a
                 )
             ); 
 }
@@ -1003,8 +997,9 @@ void task_destroy(Task *t) {
 size_t curl_write_cb(char *ptr, size_t size, size_t nmemb, void *userdata) {
     size_t real_size = size * nmemb;
 
-    String_Builder *sb = (String_Builder *) userdata;
-    string_builder_append_str_n(sb, ptr, real_size);
+    Arena_String_Builder *sb = (Arena_String_Builder *) userdata;
+    arena_da_append_many(sb->arena, sb, ptr, real_size);
+    //string_builder_append_str_n(sb, ptr, real_size);
 
     return real_size;
 }
@@ -1176,7 +1171,7 @@ Result task_poll(Task *t, Context *ctx) {
                 case CONTEXT_KIND_ARENA:
                     {
                         if (!ctx->flag[CONTEXT_KIND_ARENA]) {
-                            context_add_arena(ctx);
+                            context_add_arena(ctx, &t->context_arena);
                         }
                         Result r = task_poll(t->context_body, ctx);
                         switch (r.state) {
@@ -1184,26 +1179,6 @@ Result task_poll(Task *t, Context *ctx) {
                             case STATE_DONE:
                                 task_destroy(t->context_body);
                                 context_remove_arena(ctx);
-                                break;
-                            case STATE_PENDING:
-                                break;
-                        }
-                        return r;
-                    }
-                case CONTEXT_KIND_STRING_BUILDER:
-                    {
-                        if (!ctx->flag[CONTEXT_KIND_STRING_BUILDER]) {
-                            context_add_string_builder(ctx, &t->context_sb);
-                        }
-                        assert(ctx->string_builder != NULL);
-                        assert(t->context_body != NULL);
-                        Result r = task_poll(t->context_body, ctx);
-                        switch (r.state) {
-                            case STATE_ERROR:
-                            case STATE_DONE:
-                                task_destroy(t->context_body);
-                                t->context_body = NULL;
-                                context_remove_string_builder(ctx);
                                 break;
                             case STATE_PENDING:
                                 break;
@@ -1312,11 +1287,10 @@ Result task_poll(Task *t, Context *ctx) {
                     UNREACHABLE("CONTEXT_KIND_COUNT is not a valid Context_Kind");
             }
             UNREACHABLE("no valid Context_Kind");
-        case TASK_KIND_STRING_BUILDER_THIS:
-            assert(ctx->flag[CONTEXT_KIND_STRING_BUILDER]);
-            return result_string_view(string_view_from_string_builder(*ctx->string_builder));
         case TASK_KIND_CURL_PERFORM:
             assert(ctx->flag[CONTEXT_KIND_CURL_EASY]);
+            assert(ctx->flag[CONTEXT_KIND_ARENA]);
+
             CURLcode code;
             assert(t->url.str != NULL);
             code = curl_easy_setopt(ctx->easy_handle, CURLOPT_URL, t->url);
@@ -1330,9 +1304,9 @@ Result task_poll(Task *t, Context *ctx) {
                 printf("[ERROR] failed curl_easy_setopt: %s\n", curl_easy_strerror(code));
                 return RESULT_ERROR;
             }
-            // curl keeps its own copy of the url so we can clear the String_Builder and use it for something else
-            string_builder_clear(ctx->string_builder);
-            code = curl_easy_setopt(ctx->easy_handle, CURLOPT_WRITEDATA, ctx->string_builder);
+
+            t->curl_perform_sb.arena = ctx->arena;
+            code = curl_easy_setopt(ctx->easy_handle, CURLOPT_WRITEDATA, &t->curl_perform_sb);
             if (code != CURLE_OK) {
                 printf("[ERROR] failed curl_easy_setopt: %s\n", curl_easy_strerror(code));
                 return RESULT_ERROR;
@@ -1359,14 +1333,14 @@ Result task_poll(Task *t, Context *ctx) {
                     return RESULT_ERROR;
                 }
             }
-            return result_string_view(string_view_from_string_builder(*ctx->string_builder));
+            return result_string_view(string_view_from_arena_string_builder(t->curl_perform_sb));
         case TASK_KIND_PARSE_JSON_VALUE:
             assert(ctx->flag[CONTEXT_KIND_ARENA]);
             json_value_t *root = json_parse_ex(
                     t->json_source_str.str, t->json_source_str.count, 
                     json_parse_flags_default, 
                     json_parse_cb, 
-                    &ctx->arena, 
+                    ctx->arena, 
                     NULL
                     );
             if (root == NULL) {
