@@ -22,47 +22,195 @@
 #define ARENA_IMPLEMENTATION
 #include "thirdparty/arena.h"
 
-typedef enum {
-    WHITE,
-    RED,
-    GREEN,
-    BLUE,
-    YELLOW,
-} Color;
-
-void set_color(Color c) {
-    switch (c) {
-        case WHITE: 
-            printf("\x1b[0;37m");
-            break;
-        case RED:
-            printf("\x1b[0;31m");
-            break;
-        case GREEN:
-            printf("\x1b[0;32m");
-            break;
-        case BLUE:
-            printf("\x1b[0;34m");
-            break;
-        case YELLOW:
-            printf("\x1b[0;33m");
-            break;
-    }
-}
-
-void reset_color() {
-    printf("\x1b[0m");
-}
-
 #define STRING_BUILDER_INITIAL_CAPACITY 16
 #define STRING_BUILDER_MAXIMUM_CAPACITY 2048
 
+/************************
+ * type definitions     *
+ ************************/
+
 // TODO: Consider removing all these string_builder utility functions and using fmemopen, open_memstream, etc instead
+// TODO: or just remove this thing entirely and use the functionality from arena.h
 typedef struct {
     char *str;
     size_t capacity;
     size_t count;
 } String_Builder;
+
+typedef enum {
+    STACK_VALUE_STRING,
+    STACK_VALUE_INT,
+} Stack_Value_Kind;
+
+typedef struct {
+    Stack_Value_Kind kind;
+    union {
+        int x;
+        char *str;
+    };
+} Stack_Value;
+
+#define MAX_STACK_SIZE 8
+Stack_Value stack[MAX_STACK_SIZE];
+size_t stack_count = 0;
+
+#define STACK_TOP (stack[stack_count-1])
+
+typedef enum {
+    STATE_DONE,
+    STATE_PENDING,
+    STATE_ERROR,
+} State;
+
+typedef enum {
+    RESULT_KIND_VOID,
+    RESULT_KIND_BOOL,
+    RESULT_KIND_INT,
+    RESULT_KIND_STRING,
+    RESULT_KIND_JSON_VALUE,
+} Result_Kind;
+
+typedef struct {
+    State state;
+    Result_Kind kind;
+    // possible values
+    bool bool_val;
+    int x;
+    String_Builder *string;
+    json_value_t *json_value;
+} Result;
+
+typedef enum {
+    CONTEXT_KIND_STRING_BUILDER,
+    CONTEXT_KIND_FIFO,
+    CONTEXT_KIND_ARENA,
+    CONTEXT_KIND_CURL_GLOBAL,
+    CONTEXT_KIND_CURL_MULTI,
+    CONTEXT_KIND_CURL_EASY,
+    CONTEXT_KIND_COUNT,
+} Context_Kind;
+
+typedef struct {
+    bool flag[CONTEXT_KIND_COUNT];
+    Arena arena;
+    String_Builder *string_builder;
+    CURLM *multi_handle;
+    CURL *easy_handle;
+    int file_descriptor;
+} Context;
+
+typedef enum {
+    TASK_KIND_CONST,
+    TASK_KIND_SEQUENCE,
+    TASK_KIND_PARALLEL,
+    TASK_KIND_THEN,
+    TASK_KIND_ITERATE,
+    TASK_KIND_WAIT,
+    TASK_KIND_LOG,
+    TASK_KIND_FIFO_REPL,
+    TASK_KIND_CONTEXT,
+    TASK_KIND_STRING_BUILDER_THIS,
+    TASK_KIND_CURL_PERFORM,
+    TASK_KIND_PARSE_JSON_VALUE,
+    TASK_KIND_INSPECT_JSON_VALUE,
+} Task_Kind;
+
+typedef struct Task Task;
+typedef Task *(*Then_Function)(Result);
+typedef bool (*Predicate)(Result);
+
+#define MAX_SEQ_COUNT 4
+#define MAX_PAR_COUNT 4
+
+struct Task {
+    Task_Kind kind;
+    union {
+        // TASK_KIND_CONST
+        struct {
+            Result const_result;
+        };
+        // TASK_KIND_SEQUENCE
+        struct {
+            size_t seq_count;
+            size_t seq_index;
+            Task *seq[MAX_SEQ_COUNT];
+        };
+        // TASK_KIND_PARALLEL
+        struct {
+            size_t par_count;
+            size_t par_index;
+            Task *par[MAX_PAR_COUNT];
+            Context sub_ctx[MAX_PAR_COUNT];
+        };
+        // TASK_KIND_THEN
+        struct {
+            Task *fst;
+            Task *snd;
+            Then_Function then;
+        };
+        // TASK_KIND_ITERATE
+        struct {
+            int iter_phase;
+            Task *iter_body;
+            Task *iter_condition;
+            Result last;
+            Then_Function iter_next;
+            Then_Function iter_build_condition;
+        };
+        // TASK_KIND_LOG
+        struct {
+            String_Builder *log_msg;
+        };
+        // TASK_KIND_WAIT
+        struct {
+            double duration;
+            bool started;
+            time_t start;
+        };
+        // TASK_KIND_CONTEXT
+        struct {
+            Context_Kind context_kind;
+            Task *context_body;
+            // Only used if context_kind == CONTEXT_KIND_STRING_BUILDER
+            String_Builder context_sb;
+        };
+        // TASK_KIND_CURL_PERFORM
+        struct {
+            char *url;
+        };
+        // TASK_KIND_PARSE_JSON_VALUE
+        struct {
+            String_Builder *json_source_str;
+        };
+        // TASK_KIND_INSPECT_JSON_VALUE
+        struct {
+            json_value_t *json_root;
+        };
+    };
+};
+
+#define TASK_POOL_CAPACITY 24
+Task task_pool[TASK_POOL_CAPACITY];
+typedef struct Task_Free_Node Task_Free_Node;
+struct Task_Free_Node {
+    Task_Free_Node *next;
+};
+static_assert(sizeof(Task_Free_Node) <= sizeof(Task));
+Task_Free_Node *task_pool_head = NULL;
+
+typedef enum {
+    REPLY_CLOSE,
+    REPLY_ACK,
+    REPLY_ERROR,
+} Reply_Kind;
+
+/******************************
+ * functions                  *
+ ******************************/
+
+/******************************
+ * string_builder_*           *
+ ******************************/
 
 String_Builder string_builder_new() {
     String_Builder sb;
@@ -239,24 +387,9 @@ void build_url(String_Builder *sb, Tg_Method_Call *call) {
     string_builder_append_null(sb);
 }
 
-typedef enum {
-    STACK_VALUE_STRING,
-    STACK_VALUE_INT,
-} Stack_Value_Kind;
-
-typedef struct {
-    Stack_Value_Kind kind;
-    union {
-        int x;
-        char *str;
-    };
-} Stack_Value;
-
-#define MAX_STACK_SIZE 8
-Stack_Value stack[MAX_STACK_SIZE];
-size_t stack_count = 0;
-
-#define STACK_TOP (stack[stack_count-1])
+/******************************
+ * stack_*                    *
+ ******************************/
 
 void stack_push_string(char *str) {
     size_t l = strlen(str);
@@ -352,31 +485,9 @@ bool close_and_unlink_fifo(int fd) {
     return true;
 }
 
-typedef enum {
-    STATE_DONE,
-    STATE_PENDING,
-    STATE_ERROR,
-} State;
-
-typedef enum {
-    RESULT_KIND_VOID,
-    RESULT_KIND_BOOL,
-    RESULT_KIND_INT,
-    RESULT_KIND_INT_TUPLE,
-    RESULT_KIND_STRING,
-    RESULT_KIND_JSON_VALUE,
-} Result_Kind;
-
-typedef struct {
-    State state;
-    Result_Kind kind;
-    // possible values
-    bool bool_val;
-    int x;
-    int y;
-    String_Builder *string;
-    json_value_t *json_value;
-} Result;
+/******************************
+ * result_*                   *
+ ******************************/
 
 #define RESULT_DONE    (Result) {.state = STATE_DONE,    .kind = RESULT_KIND_VOID}
 #define RESULT_PENDING (Result) {.state = STATE_PENDING, .kind = RESULT_KIND_VOID}
@@ -396,14 +507,6 @@ Result result_int(int x) {
     return r;
 }
 
-Result result_int_tuple(int x, int y) {
-    Result r = RESULT_DONE;
-    r.kind = RESULT_KIND_INT_TUPLE;
-    r.x = x;
-    r.y = y;
-    return r;
-}
-
 Result result_string(String_Builder *sb) {
     Result r = RESULT_DONE;
     r.kind = RESULT_KIND_STRING;
@@ -418,24 +521,9 @@ Result result_json_value(json_value_t *val) {
     return r;
 }
 
-typedef enum {
-    CONTEXT_KIND_STRING_BUILDER,
-    CONTEXT_KIND_FIFO,
-    CONTEXT_KIND_ARENA,
-    CONTEXT_KIND_CURL_GLOBAL,
-    CONTEXT_KIND_CURL_MULTI,
-    CONTEXT_KIND_CURL_EASY,
-    CONTEXT_KIND_COUNT,
-} Context_Kind;
-
-typedef struct {
-    bool flag[CONTEXT_KIND_COUNT];
-    Arena arena;
-    String_Builder *string_builder;
-    CURLM *multi_handle;
-    CURL *easy_handle;
-    int file_descriptor;
-} Context;
+/******************************
+ * context_*                  *
+ ******************************/
 
 Context context_new() {
     Context c = {
@@ -529,112 +617,6 @@ void context_remove_arena(Context *c) {
     c->flag[CONTEXT_KIND_ARENA] = false;
 }
 
-typedef enum {
-    TASK_KIND_CONST,
-    TASK_KIND_SEQUENCE,
-    TASK_KIND_PARALLEL,
-    TASK_KIND_THEN,
-    TASK_KIND_ITERATE,
-    TASK_KIND_WAIT,
-    TASK_KIND_LOG,
-    TASK_KIND_FIFO_REPL,
-    TASK_KIND_CONTEXT,
-    TASK_KIND_STRING_BUILDER_THIS,
-    TASK_KIND_CURL_PERFORM,
-    TASK_KIND_PARSE_JSON_VALUE,
-    TASK_KIND_INSPECT_JSON_VALUE,
-    TASK_KIND_COUNTER_STRING,
-} Task_Kind;
-
-typedef struct Task Task;
-typedef Task *(*Then_Function)(Result);
-typedef bool (*Predicate)(Result);
-
-#define MAX_SEQ_COUNT 4
-#define MAX_PAR_COUNT 4
-
-struct Task {
-    Task_Kind kind;
-    union {
-        // TASK_KIND_CONST
-        struct {
-            Result const_result;
-        };
-        // TASK_KIND_SEQUENCE
-        struct {
-            size_t seq_count;
-            size_t seq_index;
-            Task *seq[MAX_SEQ_COUNT];
-        };
-        // TASK_KIND_PARALLEL
-        struct {
-            size_t par_count;
-            size_t par_index;
-            Task *par[MAX_PAR_COUNT];
-            Context sub_ctx[MAX_PAR_COUNT];
-        };
-        // TASK_KIND_THEN
-        struct {
-            Task *fst;
-            Task *snd;
-            Then_Function then;
-        };
-        // TASK_KIND_ITERATE
-        struct {
-            int iter_phase;
-            Task *iter_body;
-            Task *iter_condition;
-            Result last;
-            Then_Function iter_next;
-            Then_Function iter_build_condition;
-        };
-        // TASK_KIND_LOG
-        struct {
-            String_Builder *log_msg;
-        };
-        // TASK_KIND_WAIT
-        struct {
-            double duration;
-            bool started;
-            time_t start;
-        };
-        // TASK_KIND_CONTEXT
-        struct {
-            Context_Kind context_kind;
-            Task *context_body;
-            // Only used if context_kind == CONTEXT_KIND_STRING_BUILDER
-            String_Builder context_sb;
-        };
-        // TASK_KIND_CURL_PERFORM
-        struct {
-            char *url;
-        };
-        // TASK_KIND_COUNTER_STRING
-        struct {
-            int counter_string_x;
-        };
-        // TASK_KIND_PARSE_JSON_VALUE
-        struct {
-            String_Builder *json_source_str;
-        };
-        // TASK_KIND_INSPECT_JSON_VALUE
-        struct {
-            json_value_t *json_root;
-        };
-    };
-};
-
-Task *runner = NULL;
-
-#define TASK_POOL_CAPACITY 24
-Task task_pool[TASK_POOL_CAPACITY];
-typedef struct Task_Free_Node Task_Free_Node;
-struct Task_Free_Node {
-    Task_Free_Node *next;
-};
-static_assert(sizeof(Task_Free_Node) <= sizeof(Task));
-Task_Free_Node *task_pool_head = NULL;
-
 void task_free_all() {
     task_pool_head = NULL;
     for (size_t i=0; i<TASK_POOL_CAPACITY; i++) {
@@ -644,6 +626,10 @@ void task_free_all() {
     }
     assert(task_pool_head != NULL);
 }
+
+/******************************
+ * task_*                     *
+ ******************************/
 
 bool task_in_pool(Task *t) {
     return task_pool <= t && t < task_pool + TASK_POOL_CAPACITY;
@@ -807,11 +793,7 @@ Task *task_curl_easy_with_url(char *url) {
             ); 
 }
 
-typedef enum {
-    REPLY_CLOSE,
-    REPLY_ACK,
-    REPLY_ERROR,
-} Reply_Kind;
+Task *runner = NULL;
 
 #define SPACES " \f\n\r\t\v"
 
@@ -1364,11 +1346,6 @@ Result task_poll(Task *t, Context *ctx) {
                 }
             }
             return result_string(ctx->string_builder);
-        case TASK_KIND_COUNTER_STRING:
-            assert(ctx->flag[CONTEXT_KIND_STRING_BUILDER]);
-            string_builder_clear(ctx->string_builder);
-            string_builder_printf(ctx->string_builder, "Counter: %d, String_Builder: %p", t->counter_string_x, ctx->string_builder);
-            return result_string(ctx->string_builder);
         case TASK_KIND_PARSE_JSON_VALUE:
             assert(ctx->flag[CONTEXT_KIND_ARENA]);
             json_value_t *root = json_parse_ex(
@@ -1476,41 +1453,6 @@ Task *repl() {
     return repl;
 }
 
-Task *less_than(Result r) {
-    assert(r.state == STATE_DONE);
-    assert(r.kind == RESULT_KIND_INT_TUPLE);
-
-    int x = r.x;
-    int y = r.y;
-
-    r.kind = RESULT_KIND_BOOL;
-    r.bool_val = x < y;
-    return task_const(r);
-}
-
-Task *counter_string(int x) {
-    Task *t = task_alloc();
-    t->kind = TASK_KIND_COUNTER_STRING;
-    t->counter_string_x = x;
-    return task_then(t, task_log);
-}
-
-Task *counter_inc(Result r) {
-    assert(r.state == STATE_DONE);
-    assert(r.kind == RESULT_KIND_INT_TUPLE);
-
-    Task *ret = task_sequence();
-
-    Task *wrap = task_context_string_builder(counter_string(r.x), "");
-    task_seq_append(ret, wrap);
-    task_seq_append(ret, task_wait(1.0));
-
-    r.x++;
-    task_seq_append(ret, task_const(r));
-
-    return ret;
-}
-
 #ifndef TEST
 
 int main() {
@@ -1521,35 +1463,8 @@ int main() {
     runner = task_parallel();
     Task *runner_ctx = task_curl_global_context(runner);
 
-    // /*
     Task *fifo = task_file_context(repl());
     task_par_append(runner, fifo);
-    // */
-
-    /*
-    Task *foo = task_iterate(task_const(result_int_tuple( 0,  5)), counter_inc, less_than);
-    task_par_append(runner, foo);
-    Task *bar = task_iterate(task_const(result_int_tuple(20, 30)), counter_inc, less_than);
-    task_par_append(runner, bar);
-    // */
-    
-    /*
-    String_Builder msg = string_builder_new();
-    string_builder_append_str(&msg, "inside curl easy");
-
-    Task request = {
-        .kind = TASK_KIND_CURL_PERFORM,
-    };
-
-    Task *curl_easy = task_curl_easy_context(task_sequence());
-
-    task_seq_append(curl_easy->curl_easy_body, task_log(result_string(&msg)));
-    task_seq_append(curl_easy->curl_easy_body, &request);
-
-    Task *curl_global = task_curl_global_context(curl_easy);
-
-    task_par_append(runner, curl_global);
-    // */
 
     Context ctx = context_new();
 

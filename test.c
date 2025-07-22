@@ -121,10 +121,6 @@ UTEST_F_TEARDOWN(Task_Const_Fixture) {
                 case RESULT_KIND_INT:
                     ASSERT_EQ(pre.x, post.x);
                     break;
-                case RESULT_KIND_INT_TUPLE:
-                    ASSERT_EQ(pre.x, post.x);
-                    ASSERT_EQ(pre.y, post.y);
-                    break;
                 case RESULT_KIND_STRING:
                     ASSERT_EQ(pre.string, post.string);
                     ASSERT_STREQ(pre.string->str, post.string->str);
@@ -155,10 +151,6 @@ UTEST_F(Task_Const_Fixture, RESULT_KIND_BOOL) {
 
 UTEST_F(Task_Const_Fixture, RESULT_KIND_INT) {
     utest_fixture->pre = result_int(42);
-}
-
-UTEST_F(Task_Const_Fixture, RESULT_KIND_INT_TUPLE) {
-    utest_fixture->pre = result_int_tuple(42, -5);
 }
 
 UTEST_F(Task_Const_Fixture, RESULT_KIND_STRING) {
