@@ -52,7 +52,7 @@ typedef struct {
     Stack_Value_Kind kind;
     union {
         int x;
-        char *str;
+        String_View sv;
     };
 } Stack_Value;
 
@@ -212,6 +212,10 @@ typedef enum {
  * functions                  *
  ******************************/
 
+/******************************
+ * string_view_*              *
+ ******************************/
+
 String_View string_view_from_arena_string_builder(Arena_String_Builder sb) {
     String_View result = {
         .str = sb.items,
@@ -226,6 +230,54 @@ String_View string_view_from_char_ptr(char *ptr) {
         .count = strlen(ptr),
     };
     return result;
+}
+
+String_View string_view_drop_ws(String_View sv) {
+    while (sv.count > 0 && isspace(sv.str[0])) {
+        sv.str++;
+        sv.count--;
+    }
+    return sv;
+}
+
+String_View string_view_drop_non_ws(String_View sv) {
+    while (sv.count > 0 && !isspace(sv.str[0])) {
+        sv.str++;
+        sv.count--;
+    }
+    return sv;
+}
+
+String_View string_view_take_non_ws(String_View sv) {
+    size_t i=0;
+    while (i < sv.count && !isspace(sv.str[i])) i++;
+    String_View result = {
+        .str = sv.str,
+        .count = i,
+    };
+    return result;
+}
+
+bool string_view_try_parse_int(String_View sv, int *result) {
+    if (sv.count == 0) return false;
+    int acc = 0;
+    for (size_t i=0; i<sv.count; i++) {
+        char c = sv.str[i];
+        if ('0' <= c && c <= '9') {
+            acc = 10*acc + (c - '0');
+        } else {
+            return false;
+        }
+    }
+    *result = acc;
+    return true;
+}
+
+bool string_view_all_graph(String_View sv) {
+    for (size_t i=0; i<sv.count; i++) {
+        if (!isgraph(sv.str[i])) return false;
+    }
+    return true;
 }
 
 // see https://en.wikipedia.org/wiki/Percent-encoding
@@ -287,7 +339,7 @@ String_View build_url(Arena *a, Tg_Method_Call *call) {
                 char *chat_id_str = arena_sprintf(a, "chat_id=%ld", call->chat_id);
                 arena_sb_append_cstr(a, &sb, chat_id_str);
                 arena_sb_append_cstr(a, &sb, "&");
-                char *text_str = arena_sprintf(a, "text=%*s", (int) text_enc.count, text_enc.str);
+                char *text_str = arena_sprintf(a, "text=%.*s", (int) text_enc.count, text_enc.str);
                 arena_sb_append_cstr(a, &sb, text_str);
 
                 arena_free(&temp);
@@ -306,7 +358,7 @@ String_View build_url(Arena *a, Tg_Method_Call *call) {
                 char *message_id_str = arena_sprintf(a, "message_id=%d", call->message_id);
                 arena_sb_append_cstr(a, &sb, message_id_str);
                 arena_sb_append_cstr(a, &sb, "&");
-                char *reaction_str = arena_sprintf(a, "reaction=%*s", (int) emoji_enc.count, emoji_enc.str);
+                char *reaction_str = arena_sprintf(a, "reaction=%.*s", (int) emoji_enc.count, emoji_enc.str);
                 arena_sb_append_cstr(a, &sb, reaction_str);
 
                 arena_free(&temp);
@@ -321,14 +373,15 @@ String_View build_url(Arena *a, Tg_Method_Call *call) {
  ******************************/
 
 void stack_push_string(String_View sv) {
-    size_t l = sv.count;
-    char *dest = malloc((l+1)*sizeof(char));
-    strncpy(dest, sv.str, l);
-    dest[l] = '\0';
+    String_View dest = {
+        .count = sv.count,
+        .str = malloc(sv.count * sizeof(char)),
+    };
+    strncpy(dest.str, sv.str, dest.count);
 
     assert(stack_count < MAX_STACK_SIZE);
     stack[stack_count].kind = STACK_VALUE_STRING;
-    stack[stack_count].str  = dest;
+    stack[stack_count].sv   = dest;
     stack_count++;
 }
 
@@ -343,7 +396,7 @@ void stack_drop() {
     if (stack_count == 0) return;
     switch (stack[stack_count-1].kind) {
         case STACK_VALUE_STRING:
-            free(stack[stack_count-1].str);
+            free(stack[stack_count-1].sv.str);
             break;
         case STACK_VALUE_INT:
             break;
@@ -373,14 +426,14 @@ void stack_print() {
     printf("[");
     for (size_t i=0; i+1<stack_count; i++) {
         switch (stack[i].kind) {
-            case STACK_VALUE_STRING: printf("%s, ", stack[i].str); break;
+            case STACK_VALUE_STRING: printf("%.*s, ", (int) stack[i].sv.count, stack[i].sv.str); break;
             case STACK_VALUE_INT:    printf("%d, ", stack[i].x); break;
         }
     }
     if (stack_count > 0) {
         size_t i = stack_count-1;
         switch (stack[i].kind) {
-            case STACK_VALUE_STRING: printf("%s", stack[i].str); break;
+            case STACK_VALUE_STRING: printf("%.*s", (int) stack[i].sv.count, stack[i].sv.str); break;
             case STACK_VALUE_INT:    printf("%d", stack[i].x); break;
         }
     }
@@ -684,17 +737,17 @@ Task *task_context_arena(Task *body, Arena arena) {
 }
 
 // TODO: this function name is crap
-Task *task_curl_easy_with_url(char *url) {
+Task *task_curl_easy_with_url(String_View url) {
     Arena a = {0};
-    String_View url_view = {
-        .str = arena_strdup(&a, url),
-        .count = strlen(url),
+    String_View url_copy = {
+        .str = arena_memdup(&a, url.str, url.count),
+        .count = url.count,
     };
     return task_curl_easy_context( 
             task_context_arena(
                 task_then(
                     task_then(
-                        task_then(task_const(result_string_view(url_view)), task_curl_perform),
+                        task_then(task_const(result_string_view(url_copy)), task_curl_perform),
                         task_parse_json_value
                         ),
                     task_inspect_json_value
@@ -731,7 +784,7 @@ Reply_Kind command_execute(Command c) {
             return REPLY_ACK;
         case REQUEST:
             if (stack_string()) {
-                char *url = stack[stack_count-1].str;
+                String_View url = stack[stack_count-1].sv;
                 task_par_append(runner, task_curl_multi_context(task_curl_easy_with_url(url)));
                 stack_drop();
                 return REPLY_ACK;
@@ -740,7 +793,7 @@ Reply_Kind command_execute(Command c) {
         case TG_GETME:
             if (stack_string()) {
                 Arena temp = {0};
-                Tg_Method_Call call = new_tg_api_call_get_me(STACK_TOP.str);
+                Tg_Method_Call call = new_tg_api_call_get_me(STACK_TOP.sv.str);
                 String_View url = build_url(&temp, &call);
                 stack_drop();
                 stack_push_string(url);
@@ -751,7 +804,7 @@ Reply_Kind command_execute(Command c) {
         case TG_GETUPDATES:
             if (stack_string()) {
                 Arena temp = {0};
-                Tg_Method_Call call = new_tg_api_call_get_updates(STACK_TOP.str);
+                Tg_Method_Call call = new_tg_api_call_get_updates(STACK_TOP.sv.str);
                 String_View url = build_url(&temp, &call);
                 stack_drop();
                 stack_push_string(url);
@@ -797,23 +850,17 @@ Reply_Kind command_execute(Command c) {
     UNREACHABLE("no valid Command");
 }
 
-bool all_graph(const char *c) {
-    for (;*c != '\0'; c++) {
-        if (!isgraph(*c)) return false;
-    }
-    return true;
-}
-
-Reply_Kind execute(char *prog) {
-    for (char *token = strtok(prog, SPACES); token != NULL; token = strtok(NULL, SPACES)) {
-        char *endptr;
-        int val = strtol(token, &endptr, 10);
-        if (*endptr == '\0') {
+Reply_Kind execute(String_View prog) {
+    for (prog = string_view_drop_ws(prog); prog.count > 0; prog = string_view_drop_ws(string_view_drop_non_ws(prog))) {
+        String_View token = string_view_take_non_ws(prog);
+        int val;
+        if (string_view_try_parse_int(token, &val)) {
             stack_push_int(val);
-        } else if (all_graph(token)) {
+        } else if (string_view_all_graph(token)) {
             bool matched = false;
             for (Command i=0; i<COMMAND_COUNT && !matched; i++) {
-                if (strcmp(token, command_keyword[i]) == 0) {
+                // TODO: if there are commands that have the same prefix this can lead to errors
+                if (strncmp(token.str, command_keyword[i], token.count) == 0) {
                     matched = true;
                     Reply_Kind r = command_execute(i);
                     switch (r) {
@@ -825,7 +872,7 @@ Reply_Kind execute(char *prog) {
                     }
                 }
             }
-            if (!matched) stack_push_string(string_view_from_char_ptr(token));
+            if (!matched) stack_push_string(token);
         } else {
             return REPLY_ERROR;
         }
@@ -1036,7 +1083,7 @@ Result task_poll(Task *t, Context *ctx) {
             if (difftime(now, t->start) >= t->duration) return RESULT_DONE;
             return RESULT_PENDING;
         case TASK_KIND_LOG:
-            printf("[LOG] %*s\n", (int) t->log_msg.count, t->log_msg.str);
+            printf("[LOG] %.*s\n", (int) t->log_msg.count, t->log_msg.str);
             return RESULT_DONE;
         case TASK_KIND_FIFO_REPL:
             {
@@ -1050,7 +1097,7 @@ Result task_poll(Task *t, Context *ctx) {
                     assert(r < READ_BUF_CAPACITY);
                     read_buf[r] = '\0';
                     // TODO: when a command is longer than READ_BUF_CAPACITY only a part of the command is passed to execute
-                    switch (execute(read_buf)) {
+                    switch (execute(string_view_from_char_ptr(read_buf))) {
                         case REPLY_CLOSE:
                             return RESULT_DONE;
                         case REPLY_ACK:
@@ -1194,7 +1241,7 @@ Result task_poll(Task *t, Context *ctx) {
             assert(t->url.str != NULL);
             code = curl_easy_setopt(ctx->easy_handle, CURLOPT_URL, t->url);
             if (code != CURLE_OK) {
-                printf("[ERROR] tried to set url '%*s'\n", (int) t->url.count, t->url.str);
+                printf("[ERROR] tried to set url '%.*s'\n", (int) t->url.count, t->url.str);
                 printf("[ERROR] failed curl_easy_setopt: %s\n", curl_easy_strerror(code));
                 return RESULT_ERROR;
             }

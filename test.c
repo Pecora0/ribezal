@@ -3,6 +3,16 @@
 #define TEST
 #include "ribezal.c"
 
+UTEST(String_View, string_view_try_parse_int) {
+    String_View test = string_view_from_char_ptr("161");
+    int result;
+    ASSERT_TRUE(string_view_try_parse_int(test, &result));
+    ASSERT_EQ(161, result);
+
+    test = string_view_from_char_ptr("");
+    ASSERT_FALSE(string_view_try_parse_int(test, &result));
+}
+
 UTEST(Context, context_new) {
     Context ctx = context_new();
     ASSERT_TRUE(context_is_empty(&ctx));
@@ -129,14 +139,15 @@ UTEST(stack, string) {
     stack_push_string(string_view_from_char_ptr(str));
     ASSERT_EQ(stack_count, stack_count_pre+1);
     ASSERT_TRUE(stack_string());
-    ASSERT_STREQ(str, STACK_TOP.str);
+    ASSERT_EQ(strlen(str), STACK_TOP.sv.count);
+    ASSERT_STRNEQ(str, STACK_TOP.sv.str, STACK_TOP.sv.count);
 
     stack_count = 0;
 }
 
 UTEST(execute, empty) {
     size_t stack_count_pre = stack_count;
-    Reply_Kind r = execute("");
+    Reply_Kind r = execute(string_view_from_char_ptr(""));
     ASSERT_EQ(r, REPLY_ACK);
     ASSERT_EQ(stack_count, stack_count_pre);
 
@@ -145,7 +156,7 @@ UTEST(execute, empty) {
 
 UTEST(execute, string) {
     size_t stack_count_pre = stack_count;
-    Reply_Kind r = execute("hello");
+    Reply_Kind r = execute(string_view_from_char_ptr("hello"));
     ASSERT_EQ(r, REPLY_ACK);
     ASSERT_EQ(stack_count, stack_count_pre + 1);
     ASSERT_TRUE(stack_string());
@@ -155,7 +166,7 @@ UTEST(execute, string) {
 
 UTEST(execute, int) {
     size_t stack_count_pre = stack_count;
-    Reply_Kind r = execute("123");
+    Reply_Kind r = execute(string_view_from_char_ptr("123"));
     ASSERT_EQ(r, REPLY_ACK);
     ASSERT_EQ(stack_count, stack_count_pre + 1);
     ASSERT_TRUE(stack_int());
@@ -165,7 +176,7 @@ UTEST(execute, int) {
 
 UTEST(execute, quit) {
     size_t stack_count_pre = stack_count;
-    Reply_Kind r = execute("quit");
+    Reply_Kind r = execute(string_view_from_char_ptr("quit"));
     ASSERT_EQ(r, REPLY_CLOSE);
     ASSERT_EQ(stack_count, stack_count_pre);
 
@@ -177,7 +188,7 @@ UTEST(execute, drop) {
     stack_push_string(string_view_from_char_ptr("world"));
     stack_push_int(-8);
     size_t stack_count_pre = stack_count;
-    Reply_Kind r = execute("drop");
+    Reply_Kind r = execute(string_view_from_char_ptr("drop"));
     ASSERT_EQ(r, REPLY_ACK);
     ASSERT_EQ(stack_count + 1, stack_count_pre);
 
@@ -192,7 +203,7 @@ UTEST(execute, plus) {
     stack_push_int(y);
     ASSERT_TRUE(stack_two_int());
     size_t stack_count_pre = stack_count;
-    Reply_Kind r = execute("+");
+    Reply_Kind r = execute(string_view_from_char_ptr("+"));
     ASSERT_EQ(r, REPLY_ACK);
     ASSERT_EQ(stack_count + 1, stack_count_pre);
     ASSERT_TRUE(stack_int());
@@ -209,7 +220,7 @@ UTEST(execute, minus) {
     stack_push_int(y);
     ASSERT_TRUE(stack_two_int());
     size_t stack_count_pre = stack_count;
-    Reply_Kind r = execute("-");
+    Reply_Kind r = execute(string_view_from_char_ptr("-"));
     ASSERT_EQ(r, REPLY_ACK);
     ASSERT_EQ(stack_count + 1, stack_count_pre);
     ASSERT_TRUE(stack_int());
@@ -226,7 +237,7 @@ UTEST(execute, times) {
     stack_push_int(y);
     ASSERT_TRUE(stack_two_int());
     size_t stack_count_pre = stack_count;
-    Reply_Kind r = execute("*");
+    Reply_Kind r = execute(string_view_from_char_ptr("*"));
     ASSERT_EQ(r, REPLY_ACK);
     ASSERT_EQ(stack_count + 1, stack_count_pre);
     ASSERT_TRUE(stack_int());
@@ -243,7 +254,7 @@ UTEST(execute, divide) {
     stack_push_int(y);
     ASSERT_TRUE(stack_two_int());
     size_t stack_count_pre = stack_count;
-    Reply_Kind r = execute("/");
+    Reply_Kind r = execute(string_view_from_char_ptr("/"));
     ASSERT_EQ(r, REPLY_ACK);
     ASSERT_EQ(stack_count + 1, stack_count_pre);
     ASSERT_TRUE(stack_int());
@@ -269,9 +280,8 @@ UTEST(execute, arithmetic) {
     for (size_t i=0; i<PROGRAM_LIST_COUNT; i++) {
         sb.count = 0;
         arena_sb_append_cstr(&temp, &sb, program_list[i].prog);
-        arena_sb_append_null(&temp, &sb);
 
-        Reply_Kind r = execute(sb.items);
+        Reply_Kind r = execute(string_view_from_arena_string_builder(sb));
         ASSERT_EQ(r, REPLY_ACK);
         ASSERT_TRUE(stack_int());
         ASSERT_EQ(STACK_TOP.x, program_list[i].result);
