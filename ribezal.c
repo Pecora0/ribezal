@@ -115,7 +115,8 @@ typedef enum {
     TASK_KIND_CONTEXT,
     TASK_KIND_CURL_PERFORM,
     TASK_KIND_PARSE_JSON_VALUE,
-    TASK_KIND_INSPECT_JSON_VALUE,
+    TASK_KIND_GET_TG_USER,
+    TASK_KIND_GET_TG_UPDATE_LIST,
 } Task_Kind;
 
 typedef struct Task Task;
@@ -186,7 +187,7 @@ struct Task {
         struct {
             String_View json_source_str;
         };
-        // TASK_KIND_INSPECT_JSON_VALUE
+        // TASK_KIND_GET_TG_*
         struct {
             json_value_t *json_root;
         };
@@ -715,12 +716,22 @@ Task *task_parse_json_value(Result r) {
     return t;
 }
 
-Task *task_inspect_json_value(Result r) {
+Task *task_get_tg_user(Result r) {
     assert(r.state == STATE_DONE);
     assert(r.kind == RESULT_KIND_JSON_VALUE);
 
     Task *t = task_alloc();
-    t->kind = TASK_KIND_INSPECT_JSON_VALUE;
+    t->kind = TASK_KIND_GET_TG_USER;
+    t->json_root = r.json_value;
+    return t;
+}
+
+Task *task_get_tg_update_list(Result r) {
+    assert(r.state == STATE_DONE);
+    assert(r.kind == RESULT_KIND_JSON_VALUE);
+
+    Task *t = task_alloc();
+    t->kind = TASK_KIND_GET_TG_UPDATE_LIST;
     t->json_root = r.json_value;
     return t;
 }
@@ -736,8 +747,7 @@ Task *task_context_arena(Task *body, Arena arena) {
     return t;
 }
 
-// TODO: this function name is crap
-Task *task_curl_easy_with_url(String_View url) {
+Task *task_call_getme(String_View url) {
     Arena a = {0};
     String_View url_copy = {
         .str = arena_memdup(&a, url.str, url.count),
@@ -750,7 +760,27 @@ Task *task_curl_easy_with_url(String_View url) {
                         task_then(task_const(result_string_view(url_copy)), task_curl_perform),
                         task_parse_json_value
                         ),
-                    task_inspect_json_value
+                    task_get_tg_user
+                ),
+                a
+                )
+            ); 
+}
+
+Task *task_call_getupdates(String_View url) {
+    Arena a = {0};
+    String_View url_copy = {
+        .str = arena_memdup(&a, url.str, url.count),
+        .count = url.count,
+    };
+    return task_curl_easy_context( 
+            task_context_arena(
+                task_then(
+                    task_then(
+                        task_then(task_const(result_string_view(url_copy)), task_curl_perform),
+                        task_parse_json_value
+                        ),
+                    task_get_tg_update_list
                 ),
                 a
                 )
@@ -758,8 +788,6 @@ Task *task_curl_easy_with_url(String_View url) {
 }
 
 Task *runner = NULL;
-
-#define SPACES " \f\n\r\t\v"
 
 Reply_Kind command_execute(Command c) {
     switch (c) {
@@ -782,21 +810,15 @@ Reply_Kind command_execute(Command c) {
         case CLEAR:
             while (stack_count > 0) stack_drop();
             return REPLY_ACK;
-        case REQUEST:
-            if (stack_string()) {
-                String_View url = stack[stack_count-1].sv;
-                task_par_append(runner, task_curl_multi_context(task_curl_easy_with_url(url)));
-                stack_drop();
-                return REPLY_ACK;
-            }
-            return REPLY_ERROR;
         case TG_GETME:
             if (stack_string()) {
                 Arena temp = {0};
+
                 Tg_Method_Call call = new_tg_api_call_get_me(STACK_TOP.sv.str);
                 String_View url = build_url(&temp, &call);
+                task_par_append(runner, task_curl_multi_context(task_call_getme(url)));
                 stack_drop();
-                stack_push_string(url);
+
                 arena_free(&temp);
                 return REPLY_ACK;
             }
@@ -804,10 +826,12 @@ Reply_Kind command_execute(Command c) {
         case TG_GETUPDATES:
             if (stack_string()) {
                 Arena temp = {0};
+
                 Tg_Method_Call call = new_tg_api_call_get_updates(STACK_TOP.sv.str);
                 String_View url = build_url(&temp, &call);
+                task_par_append(runner, task_curl_multi_context(task_call_getupdates(url)));
                 stack_drop();
-                stack_push_string(url);
+
                 arena_free(&temp);
                 return REPLY_ACK;
             }
@@ -889,49 +913,103 @@ json_value_t *json_element_by_key(json_object_t *obj, const char *name) {
     return NULL;
 }
 
-bool as_tg_message(json_value_t *value, Tg_Message *message) {
-    json_object_t *as_obj = json_value_as_object(value);
-    if (as_obj == NULL) return false;
+bool as_tg_user(json_value_t *value, Tg_User *user) {
+    json_object_t *object = json_value_as_object(value);
+    if (object == NULL) return false;
 
-    UNUSED(message);
-    json_value_t *id_value = json_element_by_key(as_obj, "message_id");
+    json_value_t *value_first_name = json_element_by_key(object, "first_name");
+    if (value_first_name == NULL) return false;
+    json_string_t *string_first_name = json_value_as_string(value_first_name);
+    if (string_first_name == NULL) return false;
+    user->first_name = string_first_name->string;
+    return true;
+}
+
+bool as_tg_chat(json_value_t *value, Tg_Chat *chat) {
+    json_object_t *object = json_value_as_object(value);
+    if (object == NULL) return false;
+
+    json_value_t *id_value = json_element_by_key(object, "id");
     if (id_value == NULL) return false;
     json_number_t *id_number = json_value_as_number(id_value);
     if (id_number == NULL) return false;
     char *endptr;
-    message_id_t id = strtol(id_number->number, &endptr, 10);
+    chat_id_t id = strtol(id_number->number, &endptr, 10);
     assert(endptr[0] == '\0');
-    message->message_id = id;
-
-    UNIMPLEMENTED("extract field 'chat'");
-    UNIMPLEMENTED("extract field 'from'");
-    UNIMPLEMENTED("extract field 'text'");
+    chat->id = id;
 
     return true;
 }
 
-bool as_tg_update(json_value_t *value, Tg_Update *update) {
+Tg_Message *as_tg_message(Arena *a, json_value_t *value) {
+    json_object_t *object = json_value_as_object(value);
+    if (object == NULL) return NULL;
+
+    Tg_Message result;
+    {
+        json_value_t *id_value = json_element_by_key(object, "message_id");
+        if (id_value == NULL) return NULL;
+        json_number_t *id_number = json_value_as_number(id_value);
+        if (id_number == NULL) return NULL;
+        char *endptr;
+        message_id_t id = strtol(id_number->number, &endptr, 10);
+        assert(endptr[0] == '\0');
+        result.message_id = id;
+    }
+
+    {
+        json_value_t *chat_value = json_element_by_key(object, "chat");
+        if (chat_value == NULL) return NULL;
+        result.chat = arena_alloc(a, sizeof(Tg_Chat));
+        if (!as_tg_chat(chat_value, result.chat)) return NULL;
+    }
+    
+    {
+        result.from = NULL;
+        json_value_t *from_value = json_element_by_key(object, "from");
+        if (from_value != NULL) {
+            result.from = arena_alloc(a, sizeof(Tg_User));
+            if (!as_tg_user(from_value, result.from)) return NULL;
+        }
+    }
+    
+    {
+        result.text = NULL;
+        json_value_t *text_value = json_element_by_key(object, "text");
+        if (text_value != NULL) {
+            json_string_t *text_string = json_value_as_string(text_value);
+            if (text_string == NULL) return NULL;
+            result.text = text_string->string;
+        }
+    }
+
+    return arena_memdup(a, &result, sizeof(result));
+}
+
+Tg_Update *as_tg_update(Arena *a, json_value_t *value) {
     json_object_t *as_obj = json_value_as_object(value);
-    if (as_obj == NULL) return false;
+    if (as_obj == NULL) return NULL;
+
+    Tg_Update result;
 
     json_value_t *id_value = json_element_by_key(as_obj, "update_id");
-    if (id_value == NULL) return false;
+    if (id_value == NULL) return NULL;
     json_number_t *id_number = json_value_as_number(id_value);
-    if (id_number == NULL) return false;
+    if (id_number == NULL) return NULL;
     char *endptr;
     update_id_t id = strtol(id_number->number, &endptr, 10);
     assert(endptr[0] == '\0');
-    update->update_id = id;
+    result.update_id = id;
 
     json_value_t *message_value = json_element_by_key(as_obj, "message");
     // message is an optional field
+    result.message = NULL;
     if (message_value != NULL) {
-        // TODO: we need to allocate a Tg_Message struct, where du we do this
-        // We do NOT want to do a deep free at the end! -> maybe arena allocator?
-        UNIMPLEMENTED("as_tg_update");
+        result.message = as_tg_message(a, message_value);
+        if (result.message == NULL) return NULL;
     }
 
-    return true;
+    return arena_memdup(a, &result, sizeof(result));
 }
 
 // TODO: multiple read tasks can use this so every read task should have its own
@@ -1294,7 +1372,7 @@ Result task_poll(Task *t, Context *ctx) {
                 return RESULT_ERROR;
             }
             return result_json_value(root);
-        case TASK_KIND_INSPECT_JSON_VALUE:
+        case TASK_KIND_GET_TG_USER:
             if (t->json_root == NULL) {
                 UNIMPLEMENTED("task_poll");
             } else {
@@ -1306,32 +1384,51 @@ Result task_poll(Task *t, Context *ctx) {
                     json_value_t *value_result = json_element_by_key(obj, "result");
                     if (value_result == NULL) return RESULT_ERROR;
 
-                    json_object_t *object_result = json_value_as_object(value_result);
-                    assert(object_result != NULL);
-                    json_value_t *value_first_name = json_element_by_key(object_result, "first_name");
-                    if (value_first_name == NULL) return RESULT_ERROR;
-                    json_string_t *string_first_name = json_value_as_string(value_first_name);
-                    assert(string_first_name != NULL);
-                    printf("[INFO] getMe to bot named: '%s'\n", string_first_name->string);
-
-                    // json_array_t *array_result = json_value_as_array(value_result);
-                    // assert(array_result != NULL);
-                    // for (json_array_element_t *elem = array_result->start; elem != NULL; elem = elem->next) {
-                    //     Tg_Update update = {0};
-                    //     if (as_tg_update(elem->value, &update)) {
-                    //         printf("[INFO] Update of id %d\n", update.update_id);
-                    //     } else {
-                    //         printf("[ERROR] Failed to interpret json value as Tg_Update\n");
-                    //         return RESULT_ERROR;
-                    //     }
-                    // }
-                    return RESULT_DONE;
+                    Tg_User user;
+                    if (as_tg_user(value_result, &user)) {
+                        printf("[INFO] User named '%s'\n", user.first_name);
+                        return RESULT_DONE;
+                    } else {
+                        UNIMPLEMENTED("task_poll");
+                    }
                 } else if (json_value_is_false(value_ok)) {
                     UNIMPLEMENTED("task_poll");
                 } else {
                     return RESULT_ERROR;
                 }
                 return RESULT_ERROR;
+            }
+        case TASK_KIND_GET_TG_UPDATE_LIST:
+            assert(ctx->flag[CONTEXT_KIND_ARENA]);
+
+            if (t->json_root == NULL) {
+                UNIMPLEMENTED("task_poll");
+            } else {
+                json_object_t *obj = json_value_as_object(t->json_root);
+                if (obj == NULL) return RESULT_ERROR;
+                json_value_t *value_ok = json_element_by_key(obj, "ok");
+                if (value_ok == NULL) return RESULT_ERROR;
+                if (json_value_is_true(value_ok)) {
+                    json_value_t *value_result = json_element_by_key(obj, "result");
+                    if (value_result == NULL) return RESULT_ERROR;
+
+                    json_array_t *array_result = json_value_as_array(value_result);
+                    if (array_result == NULL) return RESULT_ERROR;
+                    size_t l = array_result->length;
+                    Tg_Update *update_list[l];
+                    json_array_element_t *update_elem = array_result->start;
+                    for (size_t i=0; i<l; i++) {
+                        update_list[i] = as_tg_update(ctx->arena, update_elem->value);
+                        if (update_list[i] == NULL) return RESULT_ERROR;
+                        update_elem = update_elem->next;
+                    }
+                    printf("[INFO] got %zu updates\n", l);
+                    return RESULT_DONE;
+                } else if (json_value_is_false(value_ok)) {
+                    UNIMPLEMENTED("task_poll");
+                } else {
+                    UNIMPLEMENTED("task_poll");
+                }
             }
     }
     UNREACHABLE("task_poll");

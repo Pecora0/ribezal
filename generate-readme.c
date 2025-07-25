@@ -47,12 +47,14 @@ const char *readme_pre_doc[] = {
 
 const char *readme_post_doc[] = {
     "",
-    "## Shoutouts",
+    "## References",
     "",
-    "Some cool ressources I am using as inspiration:",
-    "",
-    "- [c3fut](https://github.com/tsoding/c3fut): a futures implementation for the language C3 using interfaces",
-    "- [Pool Allocator](https://www.gingerbill.org/article/2019/02/16/memory-allocation-strategies-004/):",
+    "- [telegram bot api](https://core.telegram.org/bots/api)",
+    "- [arena.h](https://github.com/tsoding/arena)",
+    "- [utest.h](https://github.com/sheredom/utest.h)",
+    "- [json.h](https://github.com/sheredom/json.h)",
+    "- [c3fut](https://github.com/tsoding/c3fut) (inspirational): a futures implementation for the language C3 using interfaces",
+    "- [Pool Allocator](https://www.gingerbill.org/article/2019/02/16/memory-allocation-strategies-004/) (inspirational):",
     "    excellent explanation of the principle of a pool allocator",
 };
 #define README_POST_DOC_COUNT (sizeof(readme_post_doc) / sizeof(readme_post_doc[0]))

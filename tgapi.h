@@ -7,7 +7,7 @@
 
 typedef struct {
     // REQUIRED
-    char *first_name;
+    const char *first_name;
 } Tg_User;
 
 typedef int64_t chat_id_t;
@@ -25,7 +25,7 @@ typedef struct {
     Tg_Chat *chat;
     // OPTIONAL
     Tg_User *from;
-    char *text;
+    const char *text;
 } Tg_Message;
 
 typedef int32_t update_id_t;

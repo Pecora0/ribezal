@@ -47,9 +47,6 @@ There are the following keywords:
 - `clear`:
     - Stack: *tbd*
     - Description: Removes all elements from stack.
-- `request`:
-    - Stack: (string ->)
-    - Description: Performs Https-Request to the given URL.
 - `+`:
     - Stack: (int int -> int)
     - Description: Adds two numbers.
@@ -64,10 +61,10 @@ There are the following keywords:
     - Description: Divides one number by the other.
 - `tg-getMe`:
     - Stack: (string ->)
-    - Description: Constructs the URL for the Telegram method "getMe" out of the given bot token.
+    - Description: Takes a bot token, performs a 'getMe' call to the telegram api and gives some informative output.
 - `tg-getUpdates`:
     - Stack: (string ->)
-    - Description: Constructs the URL for the Telegram method "getUpdates" out of the given bot token.
+    - Description: Takes a bot token, performs a 'getUpdates' call to the telegram api and gives some informative output.
 
 ## References
 
