@@ -39,7 +39,7 @@ typedef struct {
 } Arena_String_Builder;
 
 typedef struct {
-    char *str;
+    const char *str;
     size_t count;
 } String_View;
 
@@ -52,7 +52,10 @@ typedef struct {
     Stack_Value_Kind kind;
     union {
         int x;
-        String_View sv;
+        struct {
+            char *str;
+            size_t count;
+        };
     };
 } Stack_Value;
 
@@ -374,15 +377,14 @@ String_View build_url(Arena *a, Tg_Method_Call *call) {
  ******************************/
 
 void stack_push_string(String_View sv) {
-    String_View dest = {
-        .count = sv.count,
-        .str = malloc(sv.count * sizeof(char)),
-    };
-    strncpy(dest.str, sv.str, dest.count);
+    char *ptr = malloc((sv.count + 1) * sizeof(char));
+    strncpy(ptr, sv.str, sv.count);
+    ptr[sv.count] = '\0';
 
     assert(stack_count < MAX_STACK_SIZE);
-    stack[stack_count].kind = STACK_VALUE_STRING;
-    stack[stack_count].sv   = dest;
+    stack[stack_count].kind  = STACK_VALUE_STRING;
+    stack[stack_count].str   = ptr;
+    stack[stack_count].count = sv.count;
     stack_count++;
 }
 
@@ -395,9 +397,9 @@ void stack_push_int(int x) {
 
 void stack_drop() {
     if (stack_count == 0) return;
-    switch (stack[stack_count-1].kind) {
+    switch (STACK_TOP.kind) {
         case STACK_VALUE_STRING:
-            free(stack[stack_count-1].sv.str);
+            free(STACK_TOP.str);
             break;
         case STACK_VALUE_INT:
             break;
@@ -427,14 +429,14 @@ void stack_print() {
     printf("[");
     for (size_t i=0; i+1<stack_count; i++) {
         switch (stack[i].kind) {
-            case STACK_VALUE_STRING: printf("%.*s, ", (int) stack[i].sv.count, stack[i].sv.str); break;
+            case STACK_VALUE_STRING: printf("%.*s, ", (int) stack[i].count, stack[i].str); break;
             case STACK_VALUE_INT:    printf("%d, ", stack[i].x); break;
         }
     }
     if (stack_count > 0) {
         size_t i = stack_count-1;
         switch (stack[i].kind) {
-            case STACK_VALUE_STRING: printf("%.*s", (int) stack[i].sv.count, stack[i].sv.str); break;
+            case STACK_VALUE_STRING: printf("%.*s", (int) stack[i].count, stack[i].str); break;
             case STACK_VALUE_INT:    printf("%d", stack[i].x); break;
         }
     }
@@ -814,7 +816,7 @@ Reply_Kind command_execute(Command c) {
             if (stack_string()) {
                 Arena temp = {0};
 
-                Tg_Method_Call call = new_tg_api_call_get_me(STACK_TOP.sv.str);
+                Tg_Method_Call call = new_tg_api_call_get_me(STACK_TOP.str);
                 String_View url = build_url(&temp, &call);
                 task_par_append(runner, task_curl_multi_context(task_call_getme(url)));
                 stack_drop();
@@ -827,7 +829,7 @@ Reply_Kind command_execute(Command c) {
             if (stack_string()) {
                 Arena temp = {0};
 
-                Tg_Method_Call call = new_tg_api_call_get_updates(STACK_TOP.sv.str);
+                Tg_Method_Call call = new_tg_api_call_get_updates(STACK_TOP.str);
                 String_View url = build_url(&temp, &call);
                 task_par_append(runner, task_curl_multi_context(task_call_getupdates(url)));
                 stack_drop();
