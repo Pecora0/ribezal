@@ -139,8 +139,8 @@ UTEST(stack, string) {
     stack_push_string(string_view_from_char_ptr(str));
     ASSERT_EQ(stack_count, stack_count_pre+1);
     ASSERT_TRUE(stack_string());
-    ASSERT_EQ(strlen(str), STACK_TOP.sv.count);
-    ASSERT_STRNEQ(str, STACK_TOP.sv.str, STACK_TOP.sv.count);
+    ASSERT_EQ(strlen(str), STACK_TOP.count);
+    ASSERT_STRNEQ(str, STACK_TOP.str, STACK_TOP.count);
 
     stack_count = 0;
 }

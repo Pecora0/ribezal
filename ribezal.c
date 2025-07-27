@@ -107,24 +107,22 @@ typedef struct {
 } Context;
 
 typedef enum {
-    TASK_KIND_CONST,
+    TASK_KIND_PURE,
     TASK_KIND_SEQUENCE,
     TASK_KIND_PARALLEL,
     TASK_KIND_THEN,
     TASK_KIND_ITERATE,
     TASK_KIND_WAIT,
-    TASK_KIND_LOG,
     TASK_KIND_FIFO_REPL,
     TASK_KIND_CONTEXT,
     TASK_KIND_CURL_PERFORM,
     TASK_KIND_PARSE_JSON_VALUE,
-    TASK_KIND_GET_TG_USER,
     TASK_KIND_GET_TG_UPDATE_LIST,
 } Task_Kind;
 
 typedef struct Task Task;
 typedef Task *(*Then_Function)(Result);
-typedef bool (*Predicate)(Result);
+typedef Result (*Result_Function)(Result);
 
 #define MAX_SEQ_COUNT 4
 #define MAX_PAR_COUNT 4
@@ -132,9 +130,10 @@ typedef bool (*Predicate)(Result);
 struct Task {
     Task_Kind kind;
     union {
-        // TASK_KIND_CONST
+        // TASK_KIND_PURE
         struct {
-            Result const_result;
+            Result pure_argument;
+            Result_Function pure_function;
         };
         // TASK_KIND_SEQUENCE
         struct {
@@ -630,21 +629,20 @@ void task_free(Task *t) {
     task_pool_head = tfree;
 }
 
-Task *task_const(Result r) {
-    Task *ret = task_alloc();
-    ret->kind = TASK_KIND_CONST;
-    ret->const_result = r;
-    return ret;
+Task *task_pure(Result r, Result_Function f) {
+    Task *t = task_alloc();
+    t->kind = TASK_KIND_PURE;
+    t->pure_argument = r;
+    t->pure_function = f;
+    return t;
 }
 
-// TODO: do we need this task kind?
-Task *task_log(Result r) {
-    assert(r.state == STATE_DONE);
-    assert(r.kind == RESULT_KIND_STRING_VIEW);
-    Task *ret = task_alloc();
-    ret->kind = TASK_KIND_LOG;
-    UNIMPLEMENTED("task_log");
-    return ret;
+Result result_const(Result r) {
+    return r;
+}
+
+Task *task_const(Result r) {
+    return task_pure(r, result_const);
 }
 
 void task_par_append(Task *p, Task *t) {
@@ -718,14 +716,63 @@ Task *task_parse_json_value(Result r) {
     return t;
 }
 
+json_value_t *json_element_by_key(json_object_t *obj, const char *name) {
+    for (json_object_element_t *elem = obj->start; elem != NULL; elem = elem->next) {
+        if (strncmp(name, elem->name->string, elem->name->string_size) == 0) {
+            return elem->value;
+        }
+    }
+    return NULL;
+}
+
+bool as_tg_user(json_value_t *value, Tg_User *user) {
+    json_object_t *object = json_value_as_object(value);
+    if (object == NULL) return false;
+
+    json_value_t *value_first_name = json_element_by_key(object, "first_name");
+    if (value_first_name == NULL) return false;
+    json_string_t *string_first_name = json_value_as_string(value_first_name);
+    if (string_first_name == NULL) return false;
+    user->first_name = string_first_name->string;
+    return true;
+}
+
+Result get_tg_user(Result r) {
+    assert(r.state == STATE_DONE);
+    assert(r.kind == RESULT_KIND_JSON_VALUE);
+
+    if (r.json_value == NULL) {
+        UNIMPLEMENTED("get_tg_user");
+    } else {
+        json_object_t *obj = json_value_as_object(r.json_value);
+        if (obj == NULL) return RESULT_ERROR;
+        json_value_t *value_ok = json_element_by_key(obj, "ok");
+        if (value_ok == NULL) return RESULT_ERROR;
+        if (json_value_is_true(value_ok)) {
+            json_value_t *value_result = json_element_by_key(obj, "result");
+            if (value_result == NULL) return RESULT_ERROR;
+
+            Tg_User user;
+            if (as_tg_user(value_result, &user)) {
+                printf("[INFO] User named '%s'\n", user.first_name);
+                return RESULT_DONE;
+            } else {
+                UNIMPLEMENTED("get_tg_user");
+            }
+        } else if (json_value_is_false(value_ok)) {
+            UNIMPLEMENTED("get_tg_user");
+        } else {
+            return RESULT_ERROR;
+        }
+        return RESULT_ERROR;
+    }
+}
+
 Task *task_get_tg_user(Result r) {
     assert(r.state == STATE_DONE);
     assert(r.kind == RESULT_KIND_JSON_VALUE);
 
-    Task *t = task_alloc();
-    t->kind = TASK_KIND_GET_TG_USER;
-    t->json_root = r.json_value;
-    return t;
+    return task_pure(r, get_tg_user);
 }
 
 Task *task_get_tg_update_list(Result r) {
@@ -906,27 +953,6 @@ Reply_Kind execute(String_View prog) {
     return REPLY_ACK;
 }
 
-json_value_t *json_element_by_key(json_object_t *obj, const char *name) {
-    for (json_object_element_t *elem = obj->start; elem != NULL; elem = elem->next) {
-        if (strncmp(name, elem->name->string, elem->name->string_size) == 0) {
-            return elem->value;
-        }
-    }
-    return NULL;
-}
-
-bool as_tg_user(json_value_t *value, Tg_User *user) {
-    json_object_t *object = json_value_as_object(value);
-    if (object == NULL) return false;
-
-    json_value_t *value_first_name = json_element_by_key(object, "first_name");
-    if (value_first_name == NULL) return false;
-    json_string_t *string_first_name = json_value_as_string(value_first_name);
-    if (string_first_name == NULL) return false;
-    user->first_name = string_first_name->string;
-    return true;
-}
-
 bool as_tg_chat(json_value_t *value, Tg_Chat *chat) {
     json_object_t *object = json_value_as_object(value);
     if (object == NULL) return false;
@@ -1038,8 +1064,8 @@ void *json_parse_cb(void *arena, size_t size) {
 Result task_poll(Task *t, Context *ctx) {
     assert(t != NULL);
     switch (t->kind) {
-        case TASK_KIND_CONST:
-            return t->const_result;
+        case TASK_KIND_PURE:
+            return t->pure_function(t->pure_argument);
         case TASK_KIND_SEQUENCE: 
             {
                 if (t->seq_count == 0) return RESULT_DONE;
@@ -1162,9 +1188,6 @@ Result task_poll(Task *t, Context *ctx) {
             time_t now = time(NULL);
             if (difftime(now, t->start) >= t->duration) return RESULT_DONE;
             return RESULT_PENDING;
-        case TASK_KIND_LOG:
-            printf("[LOG] %.*s\n", (int) t->log_msg.count, t->log_msg.str);
-            return RESULT_DONE;
         case TASK_KIND_FIFO_REPL:
             {
                 assert(ctx->flag[CONTEXT_KIND_FIFO]);
@@ -1374,32 +1397,6 @@ Result task_poll(Task *t, Context *ctx) {
                 return RESULT_ERROR;
             }
             return result_json_value(root);
-        case TASK_KIND_GET_TG_USER:
-            if (t->json_root == NULL) {
-                UNIMPLEMENTED("task_poll");
-            } else {
-                json_object_t *obj = json_value_as_object(t->json_root);
-                if (obj == NULL) return RESULT_ERROR;
-                json_value_t *value_ok = json_element_by_key(obj, "ok");
-                if (value_ok == NULL) return RESULT_ERROR;
-                if (json_value_is_true(value_ok)) {
-                    json_value_t *value_result = json_element_by_key(obj, "result");
-                    if (value_result == NULL) return RESULT_ERROR;
-
-                    Tg_User user;
-                    if (as_tg_user(value_result, &user)) {
-                        printf("[INFO] User named '%s'\n", user.first_name);
-                        return RESULT_DONE;
-                    } else {
-                        UNIMPLEMENTED("task_poll");
-                    }
-                } else if (json_value_is_false(value_ok)) {
-                    UNIMPLEMENTED("task_poll");
-                } else {
-                    return RESULT_ERROR;
-                }
-                return RESULT_ERROR;
-            }
         case TASK_KIND_GET_TG_UPDATE_LIST:
             assert(ctx->flag[CONTEXT_KIND_ARENA]);
 
