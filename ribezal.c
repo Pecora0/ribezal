@@ -106,6 +106,9 @@ typedef struct {
     int file_descriptor;
 } Context;
 
+// TODO: TASK_KIND_THEN acts like a short circuited "and",
+// meaning it returns a STATE_DONE iff both of its tasks return a STATE_DONE
+// => adding a short circuited "or" should be easy and useful
 typedef enum {
     TASK_KIND_PURE,
     TASK_KIND_SEQUENCE,
@@ -231,6 +234,14 @@ String_View string_view_from_char_ptr(char *ptr) {
     String_View result = {
         .str = ptr,
         .count = strlen(ptr),
+    };
+    return result;
+}
+
+String_View string_view_from_json_string(json_string_t *str) {
+    String_View result = {
+        .str = str->string,
+        .count = str->string_size,
     };
     return result;
 }
@@ -498,6 +509,13 @@ Result result_string_view(String_View sv) {
     return r;
 }
 
+Result result_err_string_view(String_View sv) {
+    Result r = RESULT_ERROR;
+    r.kind = RESULT_KIND_STRING_VIEW;
+    r.string_view = sv;
+    return r;
+}
+
 Result result_json_value(json_value_t *val) {
     Result r = RESULT_DONE;
     r.kind = RESULT_KIND_JSON_VALUE;
@@ -737,42 +755,68 @@ bool as_tg_user(json_value_t *value, Tg_User *user) {
     return true;
 }
 
+Result unpack_tg_response(Result r) {
+    assert(r.state == STATE_DONE);
+    assert(r.kind == RESULT_KIND_JSON_VALUE);
+
+    if (r.json_value == NULL) {
+        UNIMPLEMENTED("unpack_tg_response");
+    } else {
+        json_object_t *object = json_value_as_object(r.json_value);
+        if (object == NULL) {
+            UNIMPLEMENTED("unpack_tg_response");
+        }
+        json_value_t *ok_value = json_element_by_key(object, "ok");
+        if (ok_value == NULL) {
+            UNIMPLEMENTED("unpack_tg_response");
+        }
+        if (json_value_is_true(ok_value)) {
+            json_value_t *result_value = json_element_by_key(object, "result");
+            if (result_value == NULL) {
+                UNIMPLEMENTED("unpack_tg_response");
+            }
+            return result_json_value(result_value);
+        } else if (json_value_is_false(ok_value)) {
+            json_value_t *description_value = json_element_by_key(object, "description");
+            if (description_value == NULL) {
+                UNIMPLEMENTED("unpack_tg_response");
+            }
+            json_string_t *description_string = json_value_as_string(description_value);
+            if (description_string == NULL) {
+                UNIMPLEMENTED("unpack_tg_response");
+            }
+            return result_err_string_view(string_view_from_json_string(description_string));
+        } else {
+            UNIMPLEMENTED("unpack_tg_response");
+        }
+    }
+}
+
 Result get_tg_user(Result r) {
     assert(r.state == STATE_DONE);
     assert(r.kind == RESULT_KIND_JSON_VALUE);
 
     if (r.json_value == NULL) {
         UNIMPLEMENTED("get_tg_user");
+    }
+    Tg_User user;
+    if (as_tg_user(r.json_value, &user)) {
+        printf("[INFO] User named '%s'\n", user.first_name);
+        return RESULT_DONE;
     } else {
-        json_object_t *obj = json_value_as_object(r.json_value);
-        if (obj == NULL) return RESULT_ERROR;
-        json_value_t *value_ok = json_element_by_key(obj, "ok");
-        if (value_ok == NULL) return RESULT_ERROR;
-        if (json_value_is_true(value_ok)) {
-            json_value_t *value_result = json_element_by_key(obj, "result");
-            if (value_result == NULL) return RESULT_ERROR;
-
-            Tg_User user;
-            if (as_tg_user(value_result, &user)) {
-                printf("[INFO] User named '%s'\n", user.first_name);
-                return RESULT_DONE;
-            } else {
-                UNIMPLEMENTED("get_tg_user");
-            }
-        } else if (json_value_is_false(value_ok)) {
-            UNIMPLEMENTED("get_tg_user");
-        } else {
-            return RESULT_ERROR;
-        }
-        return RESULT_ERROR;
+        UNIMPLEMENTED("get_tg_user");
     }
 }
 
 Task *task_get_tg_user(Result r) {
+    return task_pure(r, get_tg_user);
+}
+
+Task *task_unpack_and_get_tg_user(Result r) {
     assert(r.state == STATE_DONE);
     assert(r.kind == RESULT_KIND_JSON_VALUE);
 
-    return task_pure(r, get_tg_user);
+    return task_then(task_pure(r, unpack_tg_response), task_get_tg_user);
 }
 
 Task *task_get_tg_update_list(Result r) {
@@ -806,10 +850,10 @@ Task *task_call_getme(String_View url) {
             task_context_arena(
                 task_then(
                     task_then(
-                        task_then(task_const(result_string_view(url_copy)), task_curl_perform),
+                        task_curl_perform(result_string_view(url_copy)),
                         task_parse_json_value
                         ),
-                    task_get_tg_user
+                    task_unpack_and_get_tg_user
                 ),
                 a
                 )
@@ -1112,31 +1156,33 @@ Result task_poll(Task *t, Context *ctx) {
                 return RESULT_PENDING;
             }
         case TASK_KIND_THEN:
-            if (t->snd == NULL) {
-                Result r = task_poll(t->fst, ctx);
+            {
+                if (t->snd == NULL) {
+                    Result r = task_poll(t->fst, ctx);
+                    switch (r.state) {
+                        case STATE_DONE:
+                            task_destroy(t->fst);
+                            t->snd = t->then(r);
+                            break;
+                        case STATE_PENDING:
+                            break;
+                        case STATE_ERROR:
+                            return r;
+                    }
+                    return RESULT_PENDING;
+                }
+                Result r = task_poll(t->snd, ctx);
                 switch (r.state) {
                     case STATE_DONE:
-                        task_destroy(t->fst);
-                        t->snd = t->then(r);
+                        task_destroy(t->snd);
                         break;
                     case STATE_PENDING:
                         break;
                     case STATE_ERROR:
-                        return r;
+                        break;
                 }
-                return RESULT_PENDING;
+                return r;
             }
-            Result r = task_poll(t->snd, ctx);
-            switch (r.state) {
-                case STATE_DONE:
-                    task_destroy(t->snd);
-                    break;
-                case STATE_PENDING:
-                    break;
-                case STATE_ERROR:
-                    break;
-            }
-            return r;
         case TASK_KIND_ITERATE:
             switch (t->iter_phase) {
                 case 0:
