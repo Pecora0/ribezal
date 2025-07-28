@@ -106,19 +106,18 @@ typedef struct {
     int file_descriptor;
 } Context;
 
-// TODO: TASK_KIND_THEN acts like a short circuited "and",
-// meaning it returns a STATE_DONE iff both of its tasks return a STATE_DONE
-// => adding a short circuited "or" should be easy and useful
 typedef enum {
     TASK_KIND_PURE,
     TASK_KIND_SEQUENCE,
     TASK_KIND_PARALLEL,
-    TASK_KIND_THEN,
+    TASK_KIND_AND,
+    TASK_KIND_OR,
     TASK_KIND_ITERATE,
     TASK_KIND_WAIT,
     TASK_KIND_FIFO_REPL,
     TASK_KIND_CONTEXT,
     TASK_KIND_CURL_PERFORM,
+    TASK_KIND_CURL_SETUP,
     TASK_KIND_PARSE_JSON_VALUE,
     TASK_KIND_GET_TG_UPDATE_LIST,
 } Task_Kind;
@@ -151,7 +150,7 @@ struct Task {
             Task *par[MAX_PAR_COUNT];
             Context sub_ctx[MAX_PAR_COUNT];
         };
-        // TASK_KIND_THEN
+        // TASK_KIND_THEN, TASK_KIND_AND, TASK_KIND_OR
         struct {
             Task *fst;
             Task *snd;
@@ -183,9 +182,12 @@ struct Task {
             // Only used if context_kind == CONTEXT_KIND_ARENA
             Arena context_arena;
         };
+        // TASK_KIND_CURL_SETUP
+        struct {
+            String_View url_setup;
+        };
         // TASK_KIND_CURL_PERFORM
         struct {
-            String_View url;
             Arena_String_Builder curl_perform_sb;
         };
         // TASK_KIND_PARSE_JSON_VALUE
@@ -217,6 +219,20 @@ typedef enum {
 /******************************
  * functions                  *
  ******************************/
+
+/******************************
+ * arena_string_builder_*     *
+ ******************************/
+
+Arena_String_Builder arena_string_builder_init(Arena *a) {
+    Arena_String_Builder result = {
+        .arena = a,
+        .items = NULL,
+        .count = 0,
+        .capacity = 0,
+    };
+    return result;
+}
 
 /******************************
  * string_view_*              *
@@ -672,9 +688,18 @@ void task_par_append(Task *p, Task *t) {
     p->par_count++;
 }
 
-Task *task_then(Task *fst, Then_Function f) {
+Task *task_and(Task *fst, Then_Function f) {
     Task *t = task_alloc();
-    t->kind = TASK_KIND_THEN;
+    t->kind = TASK_KIND_AND;
+    t->fst = fst;
+    t->snd = NULL;
+    t->then = f;
+    return t;
+}
+
+Task *task_or(Task *fst, Then_Function f) {
+    Task *t = task_alloc();
+    t->kind = TASK_KIND_OR;
     t->fst = fst;
     t->snd = NULL;
     t->then = f;
@@ -713,15 +738,28 @@ Task *task_curl_global_context(Task *body) {
     return t;
 }
 
-Task *task_curl_perform(Result r) {
+Task *task_curl_setup(Result r) {
     assert(r.state == STATE_DONE);
     assert(r.kind == RESULT_KIND_STRING_VIEW);
 
     Task *t = task_alloc();
-    t->kind = TASK_KIND_CURL_PERFORM;
-    t->url = r.string_view;
-    t->curl_perform_sb = (Arena_String_Builder) {0};
+    t->kind = TASK_KIND_CURL_SETUP;
+    t->url_setup = r.string_view;
     return t;
+}
+
+Task *task_curl_perform(Result r) {
+    assert(r.state == STATE_DONE);
+    assert(r.kind == RESULT_KIND_VOID);
+
+    Task *t = task_alloc();
+    t->kind = TASK_KIND_CURL_PERFORM;
+    t->curl_perform_sb.arena = NULL;
+    return t;
+}
+
+Task *task_curl_setup_and_perform(Result r) {
+    return task_and(task_curl_setup(r), task_curl_perform);
 }
 
 Task *task_parse_json_value(Result r) {
@@ -812,11 +850,19 @@ Task *task_get_tg_user(Result r) {
     return task_pure(r, get_tg_user);
 }
 
+Task *catch_unpack(Result r) {
+    assert(r.state == STATE_ERROR);
+    assert(r.kind == RESULT_KIND_STRING_VIEW);
+    printf("[ERROR] telegram api returned error: %.*s\n", (int) r.string_view.count, r.string_view.str);
+
+    return task_const(RESULT_ERROR);
+}
+
 Task *task_unpack_and_get_tg_user(Result r) {
     assert(r.state == STATE_DONE);
     assert(r.kind == RESULT_KIND_JSON_VALUE);
 
-    return task_then(task_pure(r, unpack_tg_response), task_get_tg_user);
+    return task_and(task_or(task_pure(r, unpack_tg_response), catch_unpack), task_get_tg_user);
 }
 
 Task *task_get_tg_update_list(Result r) {
@@ -840,20 +886,32 @@ Task *task_context_arena(Task *body, Arena arena) {
     return t;
 }
 
+// TODO: create a mechanism to put this variable in a task (kind of like currying)
+String_View url_copy;
+
+Task *catch_getme(Result r) {
+    assert(r.state == STATE_ERROR);
+    printf("[ERROR] error when requesting url '%.*s'\n", (int) url_copy.count, url_copy.str);
+    return task_const(RESULT_ERROR);
+}
+
 Task *task_call_getme(String_View url) {
     Arena a = {0};
-    String_View url_copy = {
+    url_copy = (String_View) {
         .str = arena_memdup(&a, url.str, url.count),
         .count = url.count,
     };
     return task_curl_easy_context( 
             task_context_arena(
-                task_then(
-                    task_then(
-                        task_curl_perform(result_string_view(url_copy)),
-                        task_parse_json_value
-                        ),
-                    task_unpack_and_get_tg_user
+                task_or(
+                    task_and(
+                        task_and(
+                            task_curl_setup_and_perform(result_string_view(url_copy)),
+                            task_parse_json_value
+                            ),
+                        task_unpack_and_get_tg_user
+                    ),
+                    catch_getme
                 ),
                 a
                 )
@@ -868,9 +926,9 @@ Task *task_call_getupdates(String_View url) {
     };
     return task_curl_easy_context( 
             task_context_arena(
-                task_then(
-                    task_then(
-                        task_then(task_const(result_string_view(url_copy)), task_curl_perform),
+                task_and(
+                    task_and(
+                        task_and(task_const(result_string_view(url_copy)), task_curl_perform),
                         task_parse_json_value
                         ),
                     task_get_tg_update_list
@@ -1092,6 +1150,14 @@ void task_destroy(Task *t) {
     if (task_in_pool(t)) task_free(t);
 }
 
+CURLcode curl_easy_seturl(CURL *easy_handle, String_View url) {
+    char temp[url.count + 1];
+    strncpy(temp, url.str, url.count);
+    temp[url.count] = '\0';
+    // curl keeps its own copy of the url so we can use a temporary buffer
+    return curl_easy_setopt(easy_handle, CURLOPT_URL, temp);
+}
+
 size_t curl_write_cb(char *ptr, size_t size, size_t nmemb, void *userdata) {
     size_t real_size = size * nmemb;
 
@@ -1155,7 +1221,7 @@ Result task_poll(Task *t, Context *ctx) {
                 }
                 return RESULT_PENDING;
             }
-        case TASK_KIND_THEN:
+        case TASK_KIND_AND:
             {
                 if (t->snd == NULL) {
                     Result r = task_poll(t->fst, ctx);
@@ -1163,22 +1229,48 @@ Result task_poll(Task *t, Context *ctx) {
                         case STATE_DONE:
                             task_destroy(t->fst);
                             t->snd = t->then(r);
-                            break;
-                        case STATE_PENDING:
-                            break;
+                            return RESULT_PENDING;
                         case STATE_ERROR:
+                            task_destroy(t->fst);
+                            return r;
+                        case STATE_PENDING:
                             return r;
                     }
-                    return RESULT_PENDING;
                 }
                 Result r = task_poll(t->snd, ctx);
                 switch (r.state) {
                     case STATE_DONE:
+                    case STATE_ERROR:
                         task_destroy(t->snd);
                         break;
                     case STATE_PENDING:
                         break;
+                }
+                return r;
+            }
+        case TASK_KIND_OR:
+            {
+                if (t->snd == NULL) {
+                    Result r = task_poll(t->fst, ctx);
+                    switch (r.state) {
+                        case STATE_DONE:
+                            task_destroy(t->fst);
+                            return r;
+                        case STATE_ERROR:
+                            task_destroy(t->fst);
+                            t->snd = t->then(r);
+                            return RESULT_PENDING;
+                        case STATE_PENDING:
+                            return r;
+                    }
+                }
+                Result r = task_poll(t->snd, ctx);
+                switch (r.state) {
+                    case STATE_DONE:
                     case STATE_ERROR:
+                        task_destroy(t->snd);
+                        break;
+                    case STATE_PENDING:
                         break;
                 }
                 return r;
@@ -1382,29 +1474,37 @@ Result task_poll(Task *t, Context *ctx) {
                     UNREACHABLE("CONTEXT_KIND_COUNT is not a valid Context_Kind");
             }
             UNREACHABLE("no valid Context_Kind");
+        case TASK_KIND_CURL_SETUP:
+            {
+                assert(ctx->flag[CONTEXT_KIND_CURL_EASY]);
+
+                CURLcode code;
+                assert(t->url_setup.str != NULL);
+                code = curl_easy_seturl(ctx->easy_handle, t->url_setup);
+                if (code != CURLE_OK) {
+                    printf("[ERROR] tried to set url '%.*s'\n", (int) t->url_setup.count, t->url_setup.str);
+                    printf("[ERROR] failed curl_easy_setopt: %s\n", curl_easy_strerror(code));
+                    return RESULT_ERROR;
+                }
+                code = curl_easy_setopt(ctx->easy_handle, CURLOPT_WRITEFUNCTION, curl_write_cb);
+                if (code != CURLE_OK) {
+                    printf("[ERROR] failed curl_easy_setopt: %s\n", curl_easy_strerror(code));
+                    return RESULT_ERROR;
+                }
+
+                return RESULT_DONE;
+            }
         case TASK_KIND_CURL_PERFORM:
             assert(ctx->flag[CONTEXT_KIND_CURL_EASY]);
             assert(ctx->flag[CONTEXT_KIND_ARENA]);
 
-            CURLcode code;
-            assert(t->url.str != NULL);
-            code = curl_easy_setopt(ctx->easy_handle, CURLOPT_URL, t->url);
-            if (code != CURLE_OK) {
-                printf("[ERROR] tried to set url '%.*s'\n", (int) t->url.count, t->url.str);
-                printf("[ERROR] failed curl_easy_setopt: %s\n", curl_easy_strerror(code));
-                return RESULT_ERROR;
-            }
-            code = curl_easy_setopt(ctx->easy_handle, CURLOPT_WRITEFUNCTION, curl_write_cb);
-            if (code != CURLE_OK) {
-                printf("[ERROR] failed curl_easy_setopt: %s\n", curl_easy_strerror(code));
-                return RESULT_ERROR;
-            }
-
-            t->curl_perform_sb.arena = ctx->arena;
-            code = curl_easy_setopt(ctx->easy_handle, CURLOPT_WRITEDATA, &t->curl_perform_sb);
-            if (code != CURLE_OK) {
-                printf("[ERROR] failed curl_easy_setopt: %s\n", curl_easy_strerror(code));
-                return RESULT_ERROR;
+            if (t->curl_perform_sb.arena == NULL) {
+                t->curl_perform_sb = arena_string_builder_init(ctx->arena);
+                CURLcode code = curl_easy_setopt(ctx->easy_handle, CURLOPT_WRITEDATA, &t->curl_perform_sb);
+                if (code != CURLE_OK) {
+                    printf("[ERROR] failed curl_easy_setopt: %s\n", curl_easy_strerror(code));
+                    return RESULT_ERROR;
+                }
             }
             if (ctx->flag[CONTEXT_KIND_CURL_MULTI]) {
                 int running_handles;
@@ -1422,7 +1522,7 @@ Result task_poll(Task *t, Context *ctx) {
                     assert(msg->easy_handle == ctx->easy_handle);
                 }
             } else {
-                code = curl_easy_perform(ctx->easy_handle);
+                CURLcode code = curl_easy_perform(ctx->easy_handle);
                 if (code != CURLE_OK) {
                     printf("[ERROR] failed curl_easy_perform: %s\n", curl_easy_strerror(code));
                     return RESULT_ERROR;
