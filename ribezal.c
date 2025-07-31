@@ -201,6 +201,12 @@ struct Task {
     };
 };
 
+typedef enum {
+    REPLY_CLOSE,
+    REPLY_ACK,
+    REPLY_ERROR,
+} Reply_Kind;
+
 #define TASK_POOL_CAPACITY 24
 Task task_pool[TASK_POOL_CAPACITY];
 typedef struct Task_Free_Node Task_Free_Node;
@@ -209,12 +215,6 @@ struct Task_Free_Node {
 };
 static_assert(sizeof(Task_Free_Node) <= sizeof(Task));
 Task_Free_Node *task_pool_head = NULL;
-
-typedef enum {
-    REPLY_CLOSE,
-    REPLY_ACK,
-    REPLY_ERROR,
-} Reply_Kind;
 
 /******************************
  * functions                  *
@@ -539,6 +539,10 @@ Result result_json_value(json_value_t *val) {
     return r;
 }
 
+Result result_const(Result r) {
+    return r;
+}
+
 /******************************
  * context_*                  *
  ******************************/
@@ -669,10 +673,6 @@ Task *task_pure(Result r, Result_Function f) {
     t->pure_argument = r;
     t->pure_function = f;
     return t;
-}
-
-Result result_const(Result r) {
-    return r;
 }
 
 Task *task_const(Result r) {
@@ -875,6 +875,13 @@ Task *task_get_tg_update_list(Result r) {
     return t;
 }
 
+Task *task_unpack_and_get_tg_update_list(Result r) {
+    assert(r.state == STATE_DONE);
+    assert(r.kind == RESULT_KIND_JSON_VALUE);
+
+    return task_and(task_or(task_pure(r, unpack_tg_response), catch_unpack), task_get_tg_update_list);
+}
+
 Task *task_context_arena(Task *body, Arena arena) {
     Task *t = task_alloc();
     t->kind = TASK_KIND_CONTEXT;
@@ -928,10 +935,10 @@ Task *task_call_getupdates(String_View url) {
             task_context_arena(
                 task_and(
                     task_and(
-                        task_and(task_const(result_string_view(url_copy)), task_curl_perform),
+                        task_curl_setup_and_perform(result_string_view(url_copy)),
                         task_parse_json_value
                         ),
-                    task_get_tg_update_list
+                    task_unpack_and_get_tg_update_list
                 ),
                 a
                 )
@@ -1549,31 +1556,21 @@ Result task_poll(Task *t, Context *ctx) {
             if (t->json_root == NULL) {
                 UNIMPLEMENTED("task_poll");
             } else {
-                json_object_t *obj = json_value_as_object(t->json_root);
-                if (obj == NULL) return RESULT_ERROR;
-                json_value_t *value_ok = json_element_by_key(obj, "ok");
-                if (value_ok == NULL) return RESULT_ERROR;
-                if (json_value_is_true(value_ok)) {
-                    json_value_t *value_result = json_element_by_key(obj, "result");
-                    if (value_result == NULL) return RESULT_ERROR;
-
-                    json_array_t *array_result = json_value_as_array(value_result);
-                    if (array_result == NULL) return RESULT_ERROR;
-                    size_t l = array_result->length;
-                    Tg_Update *update_list[l];
-                    json_array_element_t *update_elem = array_result->start;
-                    for (size_t i=0; i<l; i++) {
-                        update_list[i] = as_tg_update(ctx->arena, update_elem->value);
-                        if (update_list[i] == NULL) return RESULT_ERROR;
-                        update_elem = update_elem->next;
-                    }
-                    printf("[INFO] got %zu updates\n", l);
-                    return RESULT_DONE;
-                } else if (json_value_is_false(value_ok)) {
-                    UNIMPLEMENTED("task_poll");
-                } else {
+                json_array_t *array = json_value_as_array(t->json_root);
+                if (array == NULL) {
                     UNIMPLEMENTED("task_poll");
                 }
+                size_t l = array->length;
+                json_array_element_t *update_elem = array->start;
+                for (size_t i=0; i<l; i++) {
+                    Tg_Update *u = as_tg_update(ctx->arena, update_elem->value);
+                    if (u == NULL) {
+                        UNIMPLEMENTED("task_poll");
+                    }
+                    printf("[INFO] update id %d brought message: %s\n", u->update_id, u->message->text);
+                    update_elem = update_elem->next;
+                }
+                return RESULT_DONE;
             }
     }
     UNREACHABLE("task_poll");
