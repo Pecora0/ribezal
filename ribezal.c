@@ -1626,6 +1626,10 @@ Task *repl() {
     return repl;
 }
 
+// TODO: maybe the tasks should be responsible for themselves that they don't call to often
+// but this is a good workaround
+#define TARGET_SECS_PER_POLL (1 / 60.0)
+
 #ifndef TEST
 
 int main() {
@@ -1644,9 +1648,16 @@ int main() {
     printf("[INFO] starting server\n");
     Result r = task_poll(runner_ctx, &ctx);
     while (r.state != STATE_DONE) {
+        clock_t start = clock();
         r = task_poll(runner_ctx, &ctx);
+        clock_t end = clock();
+        double dt = ((double) (end - start)) / CLOCKS_PER_SEC;
+        if (dt < TARGET_TIME_PER_POLL) {
+            usleep(1000000.0 * (TARGET_SECS_PER_POLL - dt));
+        }
     }
     printf("[INFO] finishing server\n");
+    task_destroy(runner_ctx);
     
     size_t count = 0;
     for (Task_Free_Node *i = task_pool_head; i != NULL; i = i->next) count++;
